@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMV Data Downloader - Hem</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="home-page">
+    <header class="main-header">
+        <div class="brand-wrap">
+            <img src="images/MGIS-logo_azul.png" alt="MGIS logo" class="site-logo">
+            <div class="brand">LMV Data Downloader</div>
+        </div>
+        <nav>
+            <a href="index.html" class="active">Hem</a>
+            <a href="artdata.html">ArtData</a>
+            <a href="lmv.html">Vektordata</a>
+            <a href="lmv_hojd.html">Höjddata</a>
+            <a href="downloads.html">📦 Nedladdningar</a>
+        </nav>
+    </header>
+
+    <div class="hero">
+        <h1>🗺️ MGIS-Downloader</h1>
+        <p>Professionellt verktyg för att ladda ner och hantera geografisk data från svenska datakällor</p>
+    </div>
+
+    <div class="container">
+        <div class="services-grid">
+            <!-- ArtData Service -->
+            <div class="service-card">
+                <div class="service-header artdata">
+                    <div class="service-icon">🦅</div>
+                    <h2>ArtData</h2>
+                    <p>GBIF Artobservationer</p>
+                </div>
+                <div class="service-body">
+                    <h3>Beskrivning</h3>
+                    <p>Ladda ner artobservationer från GBIF (Global Biodiversity Information Facility) för svenska arter. Perfekt för ekologiska studier och naturvårdsplanering.</p>
+                    
+                    <ul class="service-features">
+                        <li>Tjäder (Tetrao urogallus)</li>
+                        <li>Fiskgjuse (Pandion haliaetus)</li>
+                        <li>Storlom & Smålom (Gavia spp.)</li>
+                        <li>Anpassningsbara geografiska filter</li>
+                        <li>Export till GeoJSON & GPKG</li>
+                    </ul>
+
+                    <a href="https://www.gbif.org/" target="_blank" class="external-link">
+                        Mer om GBIF.org
+                    </a>
+                </div>
+                <div class="service-footer">
+                    <a href="artdata.html" class="btn btn-artdata">Öppna ArtData <span class="btn-arrow">→</span></a>
+                </div>
+            </div>
+
+            <!-- Vektordata Service -->
+            <div class="service-card">
+                <div class="service-header vektor">
+                    <div class="service-icon">🏛️</div>
+                    <h2>Vektordata</h2>
+                    <p>Byggnader & Fastigheter</p>
+                </div>
+                <div class="service-body">
+                    <h3>Beskrivning</h3>
+                    <p>Hämta vektordata från Lantmäteriets STAC API. Inkluderar detaljerad information om byggnader, Marktäcke och fastighetsindelning över hela Sverige.</p>
+                    
+                    <ul class="service-features">
+                        <li>Byggnader med attributdata</li>
+                        <li>Fastighetsindelning</li>
+                        <li>Marktäcke</li>
+                        <li>Rita egna sökområden</li>
+                        <li>Automatisk nedladdning & packning</li>
+                    </ul>
+
+                    <a href="https://www.lantmateriet.se/sv/geodata/vara-produkter/produktlista/" target="_blank" class="external-link">
+                        Mer om Lantmäteriets geodata
+                    </a>
+                </div>
+                <div class="service-footer">
+                    <a href="lmv.html" class="btn btn-vektor">Öppna Vektordata <span class="btn-arrow">→</span></a>
+                </div>
+            </div>
+
+            <!-- Höjddata Service -->
+            <div class="service-card">
+                <div class="service-header hojd">
+                    <div class="service-icon">⛰️</div>
+                    <h2>Höjddata</h2>
+                    <p>Markhöjdmodell 1×1m</p>
+                </div>
+                <div class="service-body">
+                    <h3>Beskrivning</h3>
+                    <p>Ladda ner högupplöst markhöjdmodell (1×1 meter) från Lantmäteriets laserscanning. Perfekt för terränganalys, hydrologiska studier och 3D-visualisering.</p>
+                    
+                    <ul class="service-features">
+                        <li>1×1 meter rasterdata (GeoTIFF)</li>
+                        <li>Län-baserad nedladdning</li>
+                        <li>Automatisk tile-sammanslagning</li>
+                        <li>Pyramidgenerering för snabb rendering</li>
+                        <li>QGIS-färgstilar inkluderade</li>
+                    </ul>
+
+                    <a href="https://www.lantmateriet.se/sv/geodata/vara-produkter/produktlista/markhojdmodell-nedladdning/" target="_blank" class="external-link">
+                        Mer om Lantmäteriets höjddata
+                    </a>
+                </div>
+                <div class="service-footer">
+                    <a href="lmv_hojd.html" class="btn btn-hojd">Öppna Höjddata <span class="btn-arrow">→</span></a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer-section">
+        
+        <div class="contact-cta" style="margin-top:12px;">
+            <a href="mailto:support@mundogis.se?subject=Beh%C3%B6ver%20hj%C3%A4lp%20med%20installation%20eller%20annat" class="btn btn-contact">Behöver du hjälp med installation eller något annat? Kontakta oss via e‑post: support@mundogis.se</a>
+        </div>
+        <div class="footer-info">
+            <p><strong>LMV Data Downloader</strong> - Ett professionellt verktyg för geografisk datahantering</p>
+            <p>Data från <a href="https://www.gbif.org/" target="_blank" style="color: #667eea;">GBIF</a> och 
+            <a href="https://www.lantmateriet.se/" target="_blank" style="color: #667eea;">Lantmäteriet</a></p>
+        </div>
+        <p class="legal-note" style="font-size:0.9em; color:#6c757d; margin-top:12px;">Observera: När du använder detta verktyg ansvarar du för att följa Lantmäteriets och andra dataleverantörers licens‑ och användarvillkor. MundoGIS tillhandahåller endast verktyget för åtkomst och bearbetning av data; vi ansvarar inte för hur du använder eller redistribuerar nedladdade data. Läs Lantmäteriets villkor: <a href="https://www.lantmateriet.se/" target="_blank">lantmateriet.se</a>.</p>
+    </div>
+</body>
+</html>

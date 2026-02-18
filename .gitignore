@@ -1,0 +1,85 @@
+# Node modules
+node_modules/
+
+# Daemon folder (app-specific)
+daemon/
+data/
+# Download folders (generated data)
+LMV_DOWNLOADS_*/
+
+# Temporary files and folders
+tmp/
+temp/
+
+*.tmp
+*.temp
+*.swp
+
+# Logs
+*.log
+logs/
+process.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.vscode/
+*.code-workspace
+.idea/
+
+# Archives / compressed caches
+*.gz
+# Node dependencies
+node_modules/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Downloaded data folders
+LMV_DOWNLOADS_*/
+GBIF_DOWNLOADS_*/
+
+# Backup files
+*_backup.js
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python caches (if any)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Build artifacts
+dist/
+build/

@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nedladdningshanterare - LMV</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="downloads-page">
+    <header class="main-header">
+        <div class="brand-wrap">
+            <img src="images/MGIS-logo_azul.png" alt="MGIS logo" class="site-logo">
+            <div class="brand">LMV Data Downloader</div>
+        </div>
+        <nav>
+            <a href="index.html">Hem</a>
+            <a href="artdata.html">ArtData</a>
+            <a href="lmv.html">Vektordata</a>
+            <a href="lmv_hojd.html">Höjddata</a>
+            <a href="downloads.html" class="active">📦 Nedladdningar</a>
+        </nav>
+    </header>
+    <div class="container">
+        <div class="header">
+            <h1>📦 Nedladdningshanterare</h1>
+            <p>Hantera dina LMV-nedladdningar</p>
+        </div>
+        
+        <div class="toolbar">
+            <div class="stats">
+                <div class="stat-item">
+                    <span class="stat-label">Totalt mappar</span>
+                    <span class="stat-value" id="totalFolders">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Total storlek</span>
+                    <span class="stat-value" id="totalSize">0 MB</span>
+                </div>
+            </div>
+            <div class="nav-links">
+                <a href="lmv_hojd.html" class="btn btn-primary btn-sm">🗺️ Höjd</a>
+                <a href="lmv.html" class="btn btn-secondary btn-sm">📍 Vektor</a>
+                <button class="btn btn-success btn-sm" onclick="refreshList()">🔄 Uppdatera</button>
+            </div>
+        </div>
+        
+        <div class="content">
+            <div id="loadingState" class="loading">
+                <div class="spinner"></div>
+                <p>Laddar nedladdningar...</p>
+            </div>
+            
+            <div id="emptyState" class="empty-state" style="display: none;">
+                <div class="empty-state-icon">📭</div>
+                <h2>Inga nedladdningar</h2>
+                <p>Nedladdade mappar kommer att visas här</p>
+                
+            </div>
+            
+            <div id="downloadsGrid" class="downloads-grid" style="display: none;"></div>
+        </div>
+    </div>
+
+    <script>
+        let downloads = [];
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            return date.toLocaleString('sv-SE', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+        
+        async function loadDownloads() {
+            try {
+                const response = await fetch('/lmv/downloads/list');
+                const data = await response.json();
+                
+                if (data.success) {
+                    downloads = data.downloads;
+                    renderDownloads();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                console.error('Fel vid laddning av nedladdningar:', error);
+                alert('Kunde inte ladda nedladdningslistan');
+            }
+        }
+        
+        function renderDownloads() {
+            const loadingState = document.getElementById('loadingState');
+            const emptyState = document.getElementById('emptyState');
+            const grid = document.getElementById('downloadsGrid');
+            
+            loadingState.style.display = 'none';
+            
+            if (downloads.length === 0) {
+                emptyState.style.display = 'block';
+                grid.style.display = 'none';
+                return;
+            }
+            
+            emptyState.style.display = 'none';
+            grid.style.display = 'grid';
+            
+            // Actualizar estadísticas
+            const totalSize = downloads.reduce((sum, d) => sum + d.size, 0);
+            document.getElementById('totalFolders').textContent = downloads.length;
+            document.getElementById('totalSize').textContent = formatBytes(totalSize);
+            
+            // Renderizar tarjetas
+            grid.innerHTML = downloads.map(download => `
+                <div class="download-card">
+                    <div class="download-header">
+                        <div style="flex: 1;">
+                            <div class="download-title">${download.name}</div>
+                            <div class="download-badges">
+                                ${download.hasMerged ? '<span class="badge badge-success">✓ Merged</span>' : ''}
+                                ${download.hasVrt ? '<span class="badge badge-info">✓ VRT</span>' : ''}
+                                ${download.hasTileIndex ? '<span class="badge badge-info">✓ Index</span>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="download-info">
+                        <div class="info-item">
+                            <span class="info-label">Storlek</span>
+                            <span class="info-value">${formatBytes(download.size)}</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Filer</span>
+                            <span class="info-value">${download.fileCount} (${download.tifCount} TIF)</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Skapad</span>
+                            <span class="info-value">${formatDate(download.created)}</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Ändrad</span>
+                            <span class="info-value">${formatDate(download.modified)}</span>
+                        </div>
+                    </div>
+                    
+                    <div class="download-actions">
+                        <button class="btn btn-success btn-sm" onclick="downloadFolder('${download.name}')">
+                            ⬇️ Ladda ner ZIP
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteFolder('${download.name}')">
+                            🗑️ Ta bort
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function downloadFolder(folderName) {
+            const url = `/lmv/downloads/download/${encodeURIComponent(folderName)}`;
+            window.location.href = url;
+        }
+        
+        async function deleteFolder(folderName) {
+            if (!confirm(`Är du säker på att du vill ta bort "${folderName}"?\n\nDetta går inte att ångra.`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/lmv/downloads/delete/${encodeURIComponent(folderName)}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert('Mappen har tagits bort');
+                    await loadDownloads();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                console.error('Fel vid borttagning av mapp:', error);
+                alert('Kunde inte ta bort mappen: ' + error.message);
+            }
+        }
+        
+        function refreshList() {
+            document.getElementById('loadingState').style.display = 'block';
+            document.getElementById('downloadsGrid').style.display = 'none';
+            document.getElementById('emptyState').style.display = 'none';
+            loadDownloads();
+        }
+        
+        // Cargar al inicio
+        loadDownloads();
+    </script>
+</body>
+</html>

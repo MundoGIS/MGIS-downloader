@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="sv">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ladda ner LMV STAC-data (Byggnader/Fastigheter)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" crossorigin="" />
+    <link rel="stylesheet" href="./css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+</head>
+
+<body>
+     <header class="main-header">
+      <div class="brand-wrap">
+        <img src="images/MGIS-logo_azul.png" alt="MGIS logo" class="site-logo">
+        <div class="brand">LMV Data Downloader</div>
+      </div>
+      <nav>
+        <a href="index.html">Hem</a>
+        <a href="artdata.html">ArtData</a>
+          <a href="lmv.html" class="active">Vektordata</a>
+          <a href="lmv_hojd.html">Höjddata</a>
+          <a href="downloads.html">📦 Nedladdningar</a>
+      </nav>
+    </header>
+    <div class="container">
+        <h1>Ladda ner LMV STAC-data (Byggnader/Fastigheter)</h1>
+        
+        <form id="lmv-form">
+            <label for="apiUsername">LMV Användarnamn:</label>
+            <input type="text" id="apiUsername" name="apiUsername" required autocomplete="username">
+            
+            <label for="apiKey">LMV STAC API Key:</label>
+            <input type="password" id="apiKey" name="apiKey" required autocomplete="current-password">
+            
+            <div class="checkbox-group">
+                <input type="checkbox" id="remember-credentials">
+                <label for="remember-credentials">Kom ihåg inloggning</label>
+            </div>
+            
+            <label for="collection-select">Välj datakollektion:</label>
+            <select id="collection-select" name="collection-select" required>
+              <option value="" disabled selected>-- Välj en kollektion --</option>
+            </select>
+            <div id="collection-license" style="display:none; margin-top:8px; font-size:0.9em; color:#333;"></div>
+            <div class="checkbox-group" style="margin-top:6px;">
+              <input type="checkbox" id="accept-license">
+              <label for="accept-license">Jag godkänner licensvillkoren för den valda samlingen</label>
+            </div>
+
+            <p class="info-text">Definiera område genom att rita en rektangel på kartan ELLER fylla i koordinatfälten nedan.</p>
+            <div id="mapid"></div>
+
+            <fieldset class="coord-group">
+                <legend>Eller ange koordinater manuellt</legend>
+                <label for="min-lon">Min Lon:</label>
+                <input type="number" step="any" id="min-lon" name="min-lon" placeholder="-180 till 180">
+                <label for="max-lon">Max Lon:</label>
+                <input type="number" step="any" id="max-lon" name="max-lon" placeholder="-180 till 180">
+                <label for="min-lat">Min Lat:</label>
+                <input type="number" step="any" id="min-lat" name="min-lat" placeholder="-90 till 90">
+                <label for="max-lat">Max Lat:</label>
+                <input type="number" step="any" id="max-lat" name="max-lat" placeholder="-90 till 90">
+            </fieldset>
+
+            <button type="submit" id="prepare-btn">Starta nedladdning</button>
+        </form>
+
+        <hr>
+        <div>
+            <h2>Alternativ för nedladdning av hela Sverige</h2>
+            <p class="info-text">
+                Använd knappen nedan för att starta en process på servern som samlar in **alla** data för den valda samlingen för hela Sverige.
+                <br><strong>Varning:</strong> Denna process kan ta flera timmar att slutföra. Du behöver inte hålla detta fönster öppet.
+            </p>
+            <button type="button" id="start-full-download-btn">🚀 Starta nedladdning för hela Sverige</button>
+        </div>
+        <hr>
+        <div id="result-message"></div>
+        
+        <div id="download-section" style="display: none;">
+            <p>Filter inställda för: <strong id="found-collection-name"></strong> inom definierat område.</p>
+            <p>Hittades: <strong id="found-item-count"></strong> objekt.</p>
+          <button id="download-btn">Generera nedladdningslänkar</button>
+          <button id="stop-download-btn" style="display:none; margin-left:8px;">⏹ Stoppa Nedladdning</button>
+        </div>
+        
+        <div id="download-info" style="margin-top: 15px; display: none;">
+            <p>Genererade nedladdningslänkar:</p>
+            <ul id="download-links-list"></ul>
+            <p style="font-weight: bold; color: #d9534f;">OBS: Klicka på varje länk för att ladda ner motsvarande fil.</p>
+        </div>
+        <br>
+        <div>
+            <a href="https://radiantearth.github.io/stac-browser/?#/external/api.lantmateriet.se/stac-vektor/v1"
+                target="_blank" rel="noopener noreferrer">
+                Visa LMV STAC-katalog (i STAC Browser)
+            </a>
+        </div>
+        <div>
+        </div>
+    </div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js" crossorigin=""></script>
+    
+    <script>
+      // Sistema de almacenamiento seguro de credenciales
+      (function() {
+        const apiUsernameInput = document.getElementById('apiUsername');
+        const apiKeyInput = document.getElementById('apiKey');
+        const rememberCheckbox = document.getElementById('remember-credentials');
+        
+        // Cargar credenciales guardadas al inicio
+        const savedUsername = localStorage.getItem('lmv_username');
+        const savedApiKey = localStorage.getItem('lmv_apikey');
+        const rememberState = localStorage.getItem('lmv_remember') === 'true';
+        
+        if (rememberState && savedUsername && savedApiKey) {
+          apiUsernameInput.value = savedUsername;
+          apiKeyInput.value = atob(savedApiKey); // Decodificar de Base64
+          rememberCheckbox.checked = true;
+        }
+        
+        // Guardar o eliminar credenciales cuando cambia el checkbox
+        rememberCheckbox.addEventListener('change', function() {
+          if (this.checked) {
+            const username = apiUsernameInput.value;
+            const apiKey = apiKeyInput.value;
+            if (username && apiKey) {
+              localStorage.setItem('lmv_username', username);
+              localStorage.setItem('lmv_apikey', btoa(apiKey)); // Codificar en Base64
+              localStorage.setItem('lmv_remember', 'true');
+            }
+          } else {
+            localStorage.removeItem('lmv_username');
+            localStorage.removeItem('lmv_apikey');
+            localStorage.removeItem('lmv_remember');
+          }
+        });
+        
+        // Actualizar almacenamiento cuando se modifican los campos
+        [apiUsernameInput, apiKeyInput].forEach(input => {
+          input.addEventListener('input', function() {
+            if (rememberCheckbox.checked) {
+              localStorage.setItem('lmv_username', apiUsernameInput.value);
+              localStorage.setItem('lmv_apikey', btoa(apiKeyInput.value));
+            }
+          });
+        });
+      })();
+    </script>
+    
+    <script src="script_lmv.js"></script>
+    <div id="global-notification" class="notification" style="display:none; position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9999; width:min(900px,90%); text-align:center;"></div>
+</body>
+
+</html>

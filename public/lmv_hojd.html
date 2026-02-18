@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ladda ner LMV Höjddata (Markhöjdmodell)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <link rel="stylesheet" href="./css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+</head>
+<body>
+        <header class="main-header">
+          <div class="brand-wrap">
+            <img src="images/MGIS-logo_azul.png" alt="MGIS logo" class="site-logo">
+            <div class="brand">LMV Data Downloader</div>
+          </div>
+            <nav>
+                <a href="index.html">Hem</a>
+                <a href="artdata.html">ArtData</a>
+              <a href="lmv.html">Vektordata</a>
+              <a href="lmv_hojd.html" class="active">Höjddata</a>
+              <a href="downloads.html">📦 Nedladdningar</a>
+            </nav>
+        </header>   
+    <div class="container">
+<!--         <a href="lmv.html" class="nav-link">← Gå till Vektordata (Byggnader/Fastigheter)</a>
+ -->        <h1>Ladda ner Höjddata (Markhöjdmodell)</h1>
+        
+        <div class="info-box">
+            Här kan du ladda ner <strong>Markhöjdmodell (Laserdata)</strong>. 
+            Dessa filer är ofta i .tif format. Du kan välja att ladda ner för hela Sverige (alla filer) eller rita ett område i kartan.
+        </div>
+
+        <label for="apiUsername">LMV Användarnamn:</label>
+        <input type="text" id="apiUsername" placeholder="Ditt användarnamn" required autocomplete="username">
+        
+        <label for="apiKey">LMV API Key:</label>
+        <input type="password" id="apiKey" placeholder="Klistra in din API-nyckel här" required autocomplete="current-password">
+        
+        <div class="checkbox-group">
+            <input type="checkbox" id="remember-credentials">
+            <label for="remember-credentials">Kom ihåg inloggning</label>
+        </div>
+
+        <div class="geo-panel">
+            <label for="lan-select">Välj län (valfritt):</label>
+            <select id="lan-select">
+                <option value="" selected>– Ingen länsbegränsning –</option>
+            </select>
+          <label for="hojd-collection-select" style="display:none;"></label>
+          <select id="hojd-collection-select" style="display:none;">
+            <option value="" selected></option>
+          </select>
+          <div id="hojd-collection-license" style="display:none; margin-top:8px; font-size:0.9em; color:#333;"></div>
+          <div class="checkbox-group" style="margin-top:6px;">
+            <input type="checkbox" id="hojd-accept-license">
+            <label for="hojd-accept-license">Jag godkänner licensvillkoren för den valda samlingen</label>
+          </div>
+            <small>Om du väljer ett län används dess gräns i stället för ritad polygon.</small>
+            <button id="clear-geometry-btn" type="button">Rensa val</button>
+            <p id="geometry-indicator">Ingen geometri vald.</p>
+        </div>
+
+        <div id="mapid"></div>
+        <p style="font-size: 0.9em; color: #666;">Rita en polygon för att begränsa nedladdningen, eller lämna tomt för hela Sverige.</p>
+
+        <button id="start-download-btn">Starta Nedladdning</button>
+        <button id="download-all-btn">Ladda ner hela Sverige</button>
+        <button id="stop-download-btn" style="display:none;">⏹ Stoppa Nedladdning</button>
+        
+        <div id="result-message"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    
+    <script>
+      // Sistema de almacenamiento seguro de credenciales
+      (function() {
+        const apiUsernameInput = document.getElementById('apiUsername');
+        const apiKeyInput = document.getElementById('apiKey');
+        const rememberCheckbox = document.getElementById('remember-credentials');
+        
+        // Cargar credenciales guardadas al inicio
+        const savedUsername = localStorage.getItem('lmv_hojd_username');
+        const savedApiKey = localStorage.getItem('lmv_hojd_apikey');
+        const rememberState = localStorage.getItem('lmv_hojd_remember') === 'true';
+        
+        if (rememberState && savedUsername && savedApiKey) {
+          apiUsernameInput.value = savedUsername;
+          apiKeyInput.value = atob(savedApiKey); // Decodificar de Base64
+          rememberCheckbox.checked = true;
+        }
+        
+        // Guardar o eliminar credenciales cuando cambia el checkbox
+        rememberCheckbox.addEventListener('change', function() {
+          if (this.checked) {
+            const username = apiUsernameInput.value;
+            const apiKey = apiKeyInput.value;
+            if (username && apiKey) {
+              localStorage.setItem('lmv_hojd_username', username);
+              localStorage.setItem('lmv_hojd_apikey', btoa(apiKey)); // Codificar en Base64
+              localStorage.setItem('lmv_hojd_remember', 'true');
+            }
+          } else {
+            localStorage.removeItem('lmv_hojd_username');
+            localStorage.removeItem('lmv_hojd_apikey');
+            localStorage.removeItem('lmv_hojd_remember');
+          }
+        });
+        
+        // Actualizar almacenamiento cuando se modifican los campos
+        [apiUsernameInput, apiKeyInput].forEach(input => {
+          input.addEventListener('input', function() {
+            if (rememberCheckbox.checked) {
+              localStorage.setItem('lmv_hojd_username', apiUsernameInput.value);
+              localStorage.setItem('lmv_hojd_apikey', btoa(apiKeyInput.value));
+            }
+          });
+        });
+      })();
+    </script>
+    
+    <script src="script_lmv_hojd.js"></script>
+    <div id="global-notification" class="notification" style="display:none; position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9999; width:min(900px,90%); text-align:center;"></div>
+</body>
+</html>

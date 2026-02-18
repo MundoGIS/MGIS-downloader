@@ -1,0 +1,34 @@
+{
+  "name": "mgis-downloader",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": ["lmv","lantmateriet","gbif","gis","gdal","downloader","mgis"],
+  "author": "MundoGIS",
+  "license": "MPL-2.0",
+  "description": "ArtData och LMV data nedladdare",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MundoGIS/MGIS-Downloader.git"
+  },
+  "bugs": {
+    "url": "https://mundogis.se",
+    "email": "support@mundogis.se"
+  },
+  "homepage": "https://mundogis.se",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.9.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "node-cron": "^4.2.1",
+    "node-windows": "^1.0.0-beta.8",
+    "unzipper": "^0.12.3"
+  }
+}
