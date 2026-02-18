@@ -21,8 +21,7 @@ process.log
 
 # Environment files
 .env
-.env.local
-.env.*.local
+
 
 # OS files
 .DS_Store
@@ -38,9 +37,6 @@ Thumbs.db
 # Node dependencies
 node_modules/
 
-# Environment files
-.env
-.env.*
 
 # Logs
 *.log
