@@ -3,7 +3,6 @@ node_modules/
 
 # Daemon folder (app-specific)
 daemon/
-data/
 # Download folders (generated data)
 LMV_DOWNLOADS_*/
 
