@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hjälp: Skapa konto och aktivera åtkomst (LMV & GBIF)</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <style>
+        .help-container { max-width: 980px; margin: 0 auto; }
+        .tab-content { padding-top: 1rem; }
+        .note { background:#f5f7ff; padding:15px; border-left:4px solid #3273dc; margin-bottom: 1.5rem; }
+        .step-box { margin-bottom: 1.5rem; }
+        .api-url-box { background: #f0f0f0; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.9rem; border: 1px solid #ddd; margin-top: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .browser-link { font-size: 0.75rem; font-weight: bold; text-transform: uppercase; margin-left: 10px; }
+        strong { color: #363636; }
+    </style>
+</head>
+<body>
+    <section class="section">
+        <div class="container help-container">
+            <h1 class="title">Hjälp: Skapa konto och aktivera åtkomst</h1>
+            <p class="subtitle">Snabbguide för Geotorget, API-nycklar och anslutning till STAC-tjänster.</p>
+
+            <div class="box">
+                <div class="tabs is-toggle is-fullwidth" id="help-tabs">
+                    <ul>
+                        <li class="is-active" data-target="lmv-tab"><a>LMV (Geotorget & STAC)</a></li>
+                        <li data-target="gbif-tab"><a>GBIF (Artdata)</a></li>
+                    </ul>
+                </div>
+
+                <div id="lmv-tab" class="tab-content">
+                    <h2 class="title is-4">LMV – Geotorget, Developer Portal & STAC</h2>
+                    <p class="note">Följ dessa steg för att få teknisk åtkomst till Lantmäteriets STAC-tjänster.</p>
+
+                    <div class="content">
+                        <ol>
+                            <li class="step-box">
+                                <strong>1. Skapa konto på Geotorget</strong><br>
+                                Besök <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a> och registrera din organisation. Detta krävs för att teckna avtal för de datamängder ni vill använda (t.ex. Fastighetskartan eller Höjddata).
+                            </li>
+                            <li class="step-box">
+                                <strong>2. Skapa en App i Developer Portal</strong><br>
+                                Logga in på <a href="https://developer.lantmateriet.se/" target="_blank">Developer Portal</a> med dina Geotorget-uppgifter.
+                                <ul>
+                                    <li>Gå till <strong>"Applications"</strong> → <strong>"Add New Application"</strong>.</li>
+                                    <li>Sök upp API:erna (t.ex. <em>STAC Vektor</em>) och klicka på <strong>"Subscribe"</strong>.</li>
+                                </ul>
+                            </li>
+                            <li class="step-box">
+                                <strong>3. Hämta dina inloggningsuppgifter</strong><br>
+                                Gå till din Application och välj <strong>"Production Keys"</strong>.
+                                <br>Hämta <strong>Consumer Key</strong> och <strong>Consumer Secret</strong>.
+                                <br>I applikationer fylls dessa i som:
+                                <br>• <strong>Username:</strong> Consumer Key
+                                <br>• <strong>Password:</strong> Consumer Secret
+                            </li>
+                            <li class="step-box">
+                                <strong>4. API-slutpunkter & STAC Browser</strong><br>
+                                Använd länkarna nedan för att ansluta din applikation. Du kan även öppna dem direkt i <em>Radian Earth STAC Browser</em> för att inspektera datat visuellt:
+                                
+                                <div class="mt-4">
+                                    <p><strong>STAC Vektor (t.ex. Fastighetskartan):</strong></p>
+                                    <div class="api-url-box">
+                                        <span>https://api.lantmateriet.se/stac-vektor/v1</span>
+                                        <a href="https://radiantearth.github.io/stac-browser/#/external/api.lantmateriet.se/stac-vektor/v1" target="_blank" class="button is-small is-info is-outlined browser-link">Öppna Browser</a>
+                                    </div>
+                                </div>
+                                
+                                <div class="mt-4">
+                                    <p><strong>STAC Höjd (t.ex. Markmodeller, Laserdata):</strong></p>
+                                    <div class="api-url-box">
+                                        <span>https://api.lantmateriet.se/stac-hojd/v1</span>
+                                        <a href="https://radiantearth.github.io/stac-browser/#/external/api.lantmateriet.se/stac-hojd/v1" target="_blank" class="button is-small is-info is-outlined browser-link">Öppna Browser</a>
+                                    </div>
+                                </div>
+                            </li>
+                        </ol>
+                    </div>
+
+                    <div class="notification is-warning is-light">
+                        <p class="is-size-7">
+                            <strong>Tips:</strong> När du öppnar STAC Browser via länkarna ovan kommer den att be om inloggning. Använd din <strong>Consumer Key</strong> och <strong>Consumer Secret</strong> för att se innehållet i kollektionerna.
+                        </p>
+                    </div>
+                </div>
+
+                <div id="gbif-tab" class="tab-content" style="display:none;">
+                    <h2 class="title is-4">GBIF – Artdata</h2>
+                    <p class="note">Instruktioner för att hämta artobservationer via GBIF.</p>
+
+                    <div class="content">
+                        <ol>
+                            <li class="step-box">
+                                <strong>Skapa konto</strong><br>
+                                Registrera dig på <a href="https://www.gbif.org/" target="_blank">GBIF.org</a>.
+                            </li>
+                            <li class="step-box">
+                                <strong>Användning</strong><br>
+                                Ange dina GBIF-inloggningsuppgifter i appen för att ladda ner data. Kom ihåg att citera källan med det DOI-nummer som genereras vid varje uttag.
+                            </li>
+                        </ol>
+                    </div>
+                </div>
+
+                <hr>
+
+                <div class="content is-size-7">
+                    <p>Vid tekniska problem med nycklar, besök <a href="https://www.lantmateriet.se/sv/geotorget-produktstod/guider/" target="_blank">Lantmäteriets supportguider</a>.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const tabs = document.querySelectorAll('#help-tabs ul li');
+            tabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    tabs.forEach(t => t.classList.remove('is-active'));
+                    tab.classList.add('is-active');
+                    
+                    const targetId = tab.getAttribute('data-target');
+                    document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+                    const target = document.getElementById(targetId);
+                    if (target) target.style.display = '';
+                });
+            });
+        });
+    </script>
+</body>
+</html>
