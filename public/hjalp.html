@@ -34,15 +34,22 @@
                     <p class="note">Följ dessa steg för att få teknisk åtkomst till Lantmäteriets STAC-tjänster.</p>
 
                     <div class="notification is-danger">
-                        <strong>Viktigt:</strong> I vissa fall fungerar <em>inte</em> endast Consumer Key/Secret från API-portalen för att komma åt STAC-asset-länkar. Använd istället ert <strong>systemkonto</strong> (Geotorget användarnamn) tillsammans med den API-nyckel eller lösenord som organisationen tilldelat.
+                        <strong>Viktigt:</strong> Använd ett token genererat i <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">API Manager</a> eller ett systemkonto skapat i <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a>.
                     </div>
 
                     <div class="step-box">
                         <strong>Exempel (kontroll av collections med curl):</strong>
-                        <pre style="background:#f6f6f6;padding:10px;border-radius:4px;overflow:auto;"><code>curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" "https://api.lantmateriet.se/stac-vektor/v1/collections"
+                        <pre style="background:#f6f6f6;padding:10px;border-radius:4px;overflow:auto;"><code># Exempel med systemkonto (user + api key):
+curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" "https://api.lantmateriet.se/stac-vektor/v1/collections"
 
-# För att testa åtkomst till en asset (partial GET):
+# Partial GET med systemkonto:
 curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" -H "Range: bytes=0-1023" "https://api.lantmateriet.se/path/to/asset.tif"
+
+# Exempel med Bearer token (Auth token):
+curl -H "Authorization: Bearer <YOUR_TOKEN>" "https://api.lantmateriet.se/stac-vektor/v1/collections"
+
+# Partial GET med Bearer token:
+curl -H "Authorization: Bearer <YOUR_TOKEN>" -H "Range: bytes=0-1023" "https://api.lantmateriet.se/path/to/asset.tif"
 </code></pre>
                         <p style="margin-top:6px;">Byt ut <em>SYSTEMUSER</em> och <em>API_KEY</em> mot ditt systemkontonamn och den nyckel/secret som du fått från din organisation eller via Geotorget.</p>
                     </div>
@@ -62,12 +69,15 @@ curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" -H "Range: bytes=0-1023" "h
                                 </ul>
                             </li>
                             <li class="step-box">
-                                <strong>3. Hämta dina inloggningsuppgifter</strong><br>
-                                Gå till din Application och välj <strong>"Production Keys"</strong>.
-                                <br>Hämta <strong>Consumer Key</strong> och <strong>Consumer Secret</strong>.
-                                <br>I applikationer fylls dessa i som:
-                                <br>• <strong>Username:</strong> Consumer Key
-                                <br>• <strong>Password:</strong> Consumer Secret
+                                <strong>3. Generera ett Access Token med rätt scopes</strong><br>
+                                I din Application i Developer Portal:
+                                <ol>
+                                  <li>Välj <strong>Production Keys</strong> (eller rätt miljö för din access).</li>
+                                  <li>Klicka <strong>Select Scopes</strong> och markera scopes som ger åtkomst till STAC-resurser — t.ex. scopes för <em>collections</em> och <em>asset-read</em>, eller ett bredare scope som ger read‑access.</li>
+                                  <li>Klicka på <strong>Generate Access Token</strong> eller motsvarande knapp för att skapa tokenet.</li>
+                                  <li>Kopiera tokenet (access_token) och testa det med curl eller i applikationen (välj "Auth token" och klistra in token).</li>
+                                </ol>
+                                <p>Om din organisation istället använder systemkonto, hämta systemkonto‑användarnamn och tillhörande API‑nyckel från Geotorget och använd "Användarnamn + API‑nyckel" i appen.</p>
                             </li>
                             <li class="step-box">
                                 <strong>4. API-slutpunkter & STAC Browser</strong><br>
@@ -94,7 +104,8 @@ curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" -H "Range: bytes=0-1023" "h
 
                     <div class="notification is-warning is-light">
                         <p class="is-size-7">
-                            <strong>Tips:</strong> När du öppnar STAC Browser via länkarna ovan kommer den att be om inloggning. Använd din <strong>Consumer Key</strong> och <strong>Consumer Secret</strong> för att se innehållet i kollektionerna.
+                            <strong>Tips:</strong> När du öppnar STAC Browser via länkarna ovan kommer den att be om inloggning. Du kan prova med antingen Consumer Key/Secret eller med ett Bearer token.
+                            <br>För produktionstester rekommenderas att du genererar ett token med rätt scopes i Developer Portal och använder det i applikationen (välj "Auth token").
                         </p>
                     </div>
                 </div>

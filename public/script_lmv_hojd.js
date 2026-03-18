@@ -132,11 +132,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Cargar colecciones de höjd usando la API (requiere API Key en header)
     async function loadHojdCollections() {
+        const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
         const apiKey = document.getElementById('apiKey').value;
-        if (!apiKey) return;
+        const apiToken = document.getElementById('apiToken').value;
         if (!hojdCollectionSelect) return; // nothing to do if select is removed from DOM
         try {
-            const res = await fetch('/lmv/hojd/collections', { headers: { 'X-API-Key': apiKey } });
+            const headers = {};
+            if (authMethod === 'token' && apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
+            if (authMethod === 'userpass' && apiKey) headers['X-API-Key'] = apiKey;
+            const res = await fetch('/lmv/hojd/collections', { headers });
             const json = await res.json();
             if (!json.success || !Array.isArray(json.collections)) return;
 
@@ -162,6 +166,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Cargar cuando cambie la API key
     document.getElementById('apiKey').addEventListener('change', loadHojdCollections);
     document.getElementById('apiKey').addEventListener('blur', loadHojdCollections);
+    const authRadios = document.getElementsByName('auth-method');
+    Array.from(authRadios).forEach(r => r.addEventListener('change', loadHojdCollections));
 
     if (hojdCollectionSelect) {
         hojdCollectionSelect.addEventListener('change', () => {
@@ -275,7 +281,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const vres = await fetch('/lmv/validate', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ apiUsername: payload.apiUsername, apiKey: payload.apiKey, collectionId: payload.collectionId, apiType: payload.apiType })
+                        body: JSON.stringify({ apiUsername: payload.apiUsername, apiKey: payload.apiKey, apiToken: payload.apiToken, collectionId: payload.collectionId, apiType: payload.apiType })
                     });
                     if (vres.status === 401 || vres.status === 403) {
                         showMsg('Fel: Ogiltigt användarnamn eller API-nyckel. Kontrollera dina uppgifter.', 'error');
@@ -340,9 +346,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     btn.addEventListener('click', () => {
+        const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
         const apiUsername = document.getElementById('apiUsername').value;
         const apiKey = document.getElementById('apiKey').value;
-        if (!apiUsername || !apiKey) return showMsg('Ange användarnamn och API Key.', 'error');
+        const apiToken = document.getElementById('apiToken').value;
+        if (authMethod === 'userpass' && (!apiUsername || !apiKey)) return showMsg('Ange användarnamn och API Key.', 'error');
+        if (authMethod === 'token' && !apiToken) return showMsg('Ange Auth token.', 'error');
         if (!currentGeometry) return showMsg('Välj ett län eller rita ett område på kartan.', 'error');
         
         const geometryPayload = currentGeometry || null;
@@ -356,6 +365,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         triggerDownload({
             apiUsername,
             apiKey,
+            apiToken: apiToken || undefined,
             collectionId: hojdCollectionSelect && hojdCollectionSelect.value ? hojdCollectionSelect.value : 'ALL_MARKHOJD', // usar samling si vald
             apiType: 'hojd',
             geometry: geometryPayload,
@@ -364,9 +374,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     downloadAllBtn.addEventListener('click', () => {
+        const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
         const apiUsername = document.getElementById('apiUsername').value;
         const apiKey = document.getElementById('apiKey').value;
-        if (!apiUsername || !apiKey) return showMsg('Ange användarnamn och API Key.', 'error');
+        const apiToken = document.getElementById('apiToken').value;
+        if (authMethod === 'userpass' && (!apiUsername || !apiKey)) return showMsg('Ange användarnamn och API Key.', 'error');
+        if (authMethod === 'token' && !apiToken) return showMsg('Ange Auth token.', 'error');
         // Para descarga completa, si hay samling seleccionada exigir aceptación
         const selOpt = hojdCollectionSelect ? hojdCollectionSelect.selectedOptions[0] : null;
         const license = selOpt ? selOpt.dataset.license : null;
@@ -376,6 +389,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         triggerDownload({
             apiUsername,
             apiKey,
+            apiToken: apiToken || undefined,
             collectionId: hojdCollectionSelect && hojdCollectionSelect.value ? hojdCollectionSelect.value : 'ALL_MARKHOJD',
             apiType: 'hojd',
             geometry: null,

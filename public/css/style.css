@@ -1042,3 +1042,41 @@ body.downloads-page {
         padding: 20px;
     }
 }
+
+/* ===== AUTH WIDGET ===== */
+.auth-method {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.auth-option {
+    background: #f7f9fb;
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    font-weight: 600;
+}
+.auth-option input { margin: 0; }
+.auth-option.active {
+    background: linear-gradient(90deg, rgba(52,152,219,0.12), rgba(52,152,219,0.06));
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.token-input { margin-top: 6px; }
+
+.credential-warning {
+    margin-top: 10px;
+    padding: 12px;
+    border-radius: 8px;
+    background: linear-gradient(90deg, rgba(255,246,230,1), rgba(255,243,224,1));
+    border: 1px solid rgba(230,126,34,0.2);
+    color: #6d3b00;
+}
+
+.auth-row { display:flex; gap:16px; align-items:flex-start; }
+.auth-col { flex:1; }

@@ -41,8 +41,30 @@ npm start
 Öppna webbläsaren på `http://localhost:3003`.
 
 Viktigt om autentisering mot Lantmäteriet (LMV)
-- Den här applikationen brukar fungera med ett **systemkonto** från Geotorget (organisationskonto). Ange systemkonto-användarnamn i fältet "LMV Användarnamn" och den API-nyckel/secret som din organisation tilldelat i fältet "LMV STAC API Key".
-- Observera: Consumer Key/Consumer Secret som skapas i API-portalen (`https://apimanager.lantmateriet.se/devportal/apis`) fungerar inte alltid för att nå STAC-assets. Om du får behörighetsfel, försök med ditt Geotorget systemkonto och den tilldelade API-nyckeln.
+- Den här applikationen kan användas med antingen ett **Bearer token** (från API Manager) eller ett **systemkonto** från Geotorget.
+
+- Token (rekommenderat testflöde): Generera ett access token i <https://apimanager.lantmateriet.se/devportal/apis> genom att välja din Application → Production Keys → Select Scopes. Markera scopes för STAC (t.ex. collections och asset‑read) och generera tokenet. I appen välj "Auth token" och klistra in token.
+
+- Systemkonto: Om din organisation föredrar systemkonto, ange systemkonto‑användarnamn i fältet "LMV Användarnamn" och den tilldelade API‑nyckeln/secret i fältet "LMV STAC API Key".
+- Nytt: Auth token (Bearer)
+	- Applikationen accepterar också ett **Auth token** (Bearer) som alternativ till user/password + X-API-Key. I användargränssnittet finns nu en valbar autentiseringsmetod: "Användarnamn + API-nyckel" eller "Auth token (Bearer)".
+	- Om du har ett access token (t.ex. utfärdat av en token-tjänst eller gateway) kan du välja "Auth token" i UI och klistra in token i fältet. Token skickas till servern i fältet `apiToken` och används som HTTP-header `Authorization: Bearer <token>`.
+
+Exempel (curl) — använda Bearer token mot STAC collections:
+
+```bash
+# Lista collections med Bearer token
+curl -H "Authorization: Bearer <YOUR_TOKEN>" "https://api.lantmateriet.se/stac-vektor/v1/collections"
+
+# Partial GET mot asset med Bearer token
+curl -H "Authorization: Bearer <YOUR_TOKEN>" -H "Range: bytes=0-1023" "https://api.lantmateriet.se/path/to/asset.tif"
+```
+
+Notera: Om du istället använder user/pass + apiKey (systemkonto) fungerar följande exempel:
+
+```bash
+curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" "https://api.lantmateriet.se/stac-vektor/v1/collections"
+```
 
 Hjälp i appen
 - Öppna menyn "Hjälp" i appen för en steg-för-steg-guide (sve): `hjalp.html`. Den innehåller länkar till Geotorget, API-portal, STAC-browsern och GBIF.

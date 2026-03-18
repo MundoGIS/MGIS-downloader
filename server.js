@@ -262,14 +262,18 @@ function normalizeGeometryPayload(rawGeometry) {
 }
 
 // --- VALIDACIÓN DE CREDENCIALES LMV ---
-async function validateLmvCredentials(apiUsername, apiKey, apiType, collectionId) {
+async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, collectionId) {
     const STAC_BASE = getStacBase(apiType);
 
     // 1) Intentar obtener al menos un item de la colección para disponer de un asset a chequear
     try {
         const searchUrl = `${STAC_BASE}/search`;
         const body = { collections: [collectionId], limit: 1 };
-        const searchRes = await axios.post(searchUrl, body, { headers: { 'X-API-Key': apiKey }, timeout: 10000 });
+        // Construir headers: preferir apiToken (Bearer) si se proporcionó, si no usar X-API-Key
+        const headers = {};
+        if (apiKey) headers['X-API-Key'] = apiKey;
+        if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
+        const searchRes = await axios.post(searchUrl, body, { headers, timeout: 10000 });
         const features = (searchRes.data && searchRes.data.features) || [];
         if (features.length > 0) {
             const item = features[0];
@@ -285,9 +289,14 @@ async function validateLmvCredentials(apiUsername, apiKey, apiType, collectionId
 
                 try {
                     // Intentar una GET parcial (Range) para forzar comprobación de permisos sin descargar todo
+                    // Preparar headers para el GET parcial
+                    const getHeaders = { 'Range': 'bytes=0-1023' };
+                    if (apiKey) getHeaders['X-API-Key'] = apiKey;
+                    if (apiToken) getHeaders['Authorization'] = `Bearer ${apiToken}`;
+                    const getAuth = (apiUsername && apiKey && !apiToken) ? { username: apiUsername, password: apiKey } : undefined;
                     const getRes = await axios.get(assetUrl, {
-                        headers: { 'X-API-Key': apiKey, 'Range': 'bytes=0-1023' },
-                        auth: apiUsername && apiKey ? { username: apiUsername, password: apiKey } : undefined,
+                        headers: getHeaders,
+                        auth: getAuth,
                         timeout: 10000,
                         responseType: 'stream',
                         maxRedirects: 5,
@@ -326,9 +335,13 @@ async function validateLmvCredentials(apiUsername, apiKey, apiType, collectionId
     // Fallback: intentar acceder al endpoint de collections (si no había items)
     try {
         const testUrl = `${STAC_BASE}/collections`;
+        const colHeaders = {};
+        if (apiKey) colHeaders['X-API-Key'] = apiKey;
+        if (apiToken) colHeaders['Authorization'] = `Bearer ${apiToken}`;
+        const colAuth = (apiUsername && apiKey && !apiToken) ? { username: apiUsername, password: apiKey } : undefined;
         const res = await axios.get(testUrl, {
-            headers: { 'X-API-Key': apiKey },
-            auth: apiUsername && apiKey ? { username: apiUsername, password: apiKey } : undefined,
+            headers: colHeaders,
+            auth: colAuth,
             timeout: 10000
         });
         return { ok: true, status: res.status };
@@ -544,12 +557,17 @@ app.get('/lmv/collections', async (req, res) => {
 app.get('/lmv/hojd/collections', async (req, res) => {
     try {
         const apiKey = req.headers['x-api-key'];
-        if (!apiKey) {
-            return res.status(401).json({ success: false, error: 'API Key requerida en el header X-API-Key' });
+        const authHeader = req.headers['authorization'];
+        if (!apiKey && !authHeader) {
+            return res.status(401).json({ success: false, error: 'API Key requerida en el header X-API-Key o Authorization: Bearer <token>' });
         }
-        
+
+        const headers = {};
+        if (apiKey) headers['X-API-Key'] = apiKey;
+        if (authHeader) headers['Authorization'] = authHeader;
+
         const response = await axios.get('https://api.lantmateriet.se/stac-hojd/v1/collections', {
-            headers: { 'X-API-Key': apiKey }
+            headers
         });
         res.json({ success: true, collections: response.data.collections });
     } catch (error) {
@@ -573,7 +591,7 @@ app.get('/lmv/lan', (req, res) => {
 
 // --- LÓGICA DE DESCARGA ---
 
-async function fetchDownloadAndUnzipAll(apiKey, apiUsername, collectionId, apiType, geometry, geometryLabel = null, abortSignal = null) {
+async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, abortSignal = null) {
     const STAC_BASE = getStacBase(apiType);
     const slugFromLabel = geometryLabel ? slugify(geometryLabel) : '';
     const areaSlug = slugFromLabel || (geometryLabel ? 'omrade' : '');
@@ -624,7 +642,10 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, collectionId, apiTy
             return;
         }
         try {
-            const config = { headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' } };
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['X-API-Key'] = apiKey;
+            if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
+            const config = { headers };
             let response;
             
             if (nextUrl === `${STAC_BASE}/search`) {
@@ -727,9 +748,14 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, collectionId, apiTy
             try {
                 if (!fs.existsSync(filePath)) {
                     const httpAgent = new http.Agent({ keepAlive: false });
+                    const downloadHeaders = {};
+                    if (apiKey) downloadHeaders['X-API-Key'] = apiKey;
+                    if (apiToken) downloadHeaders['Authorization'] = `Bearer ${apiToken}`;
+                    const downloadAuth = (apiUsername && apiKey && !apiToken) ? { username: apiUsername, password: apiKey } : undefined;
                     const response = await axios({
                         method: 'GET', url, responseType: 'stream', httpAgent, timeout: 60000,
-                        auth: { username: apiUsername, password: apiKey }
+                        headers: downloadHeaders,
+                        auth: downloadAuth
                     });
                     const writer = fs.createWriteStream(filePath);
                     response.data.pipe(writer);
@@ -868,16 +894,17 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, collectionId, apiTy
 
 // --- RUTA DE INICIO DE DESCARGA ---
 app.post('/lmv/start-full-download', async (req, res) => {
-    const { apiKey, apiUsername, collectionId, apiType, geometry, geometryLabel } = req.body;
+    const { apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel } = req.body;
 
     // Standardvärde: om apiType saknas används 'vektor' (bakåtkompatibilitet)
     const type = apiType || 'vektor';
 
-    if (!apiKey || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
+    // Accept either apiKey or apiToken when using token-based auth
+    if (!(apiKey || apiToken) || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
 
     // Validar credenciales antes de iniciar cualquier proceso en background
     try {
-        const valid = await validateLmvCredentials(apiUsername, apiKey, type, collectionId);
+        const valid = await validateLmvCredentials(apiUsername, apiKey, apiToken, type, collectionId);
         if (!valid.ok) {
             const status = valid.status || 401;
             writeToLog(`[VALIDATION] Felaktiga LMV-uppgifter (status: ${status}). Avbryter start.`);
@@ -903,8 +930,11 @@ app.post('/lmv/start-full-download', async (req, res) => {
             
             (async () => {
                 try {
+                    const listHeaders = {};
+                    if (apiKey) listHeaders['X-API-Key'] = apiKey;
+                    if (apiToken) listHeaders['Authorization'] = `Bearer ${apiToken}`;
                     const listRes = await axios.get('https://api.lantmateriet.se/stac-hojd/v1/collections', {
-                        headers: { 'X-API-Key': apiKey }
+                        headers: listHeaders
                     });
                     const markhojdCols = listRes.data.collections.filter(col => 
                         col.id.toLowerCase().includes('markhojd') || col.title.toLowerCase().includes('markhöjd')
@@ -922,7 +952,7 @@ app.post('/lmv/start-full-download', async (req, res) => {
                         processed++;
                         writeToLog(`[ALL_MARKHOJD] (${processed}/${markhojdCols.length}) -> ${col.id} — startar hämtning.`);
                         try {
-                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, col.id, 'hojd', geometry, geometryLabel, abortController.signal);
+                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, abortController.signal);
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) slutförd.`);
                         } catch (err) {
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) misslyckades: ${err.message}`);
@@ -942,7 +972,7 @@ app.post('/lmv/start-full-download', async (req, res) => {
 
     // Normal logik (en enda samling)
     res.status(202).json({ success: true, message: `Process startad för '${collectionId}'.`, downloadId });
-    fetchDownloadAndUnzipAll(apiKey, apiUsername, collectionId, type, geometry, geometryLabel, abortController.signal)
+    fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, abortController.signal)
         .catch(err => console.error(`[${collectionId}] Error tarea fondo:`, err))
         .finally(() => activeDownloads.delete(downloadId));
 });
@@ -1063,12 +1093,13 @@ app.listen(port, () => {
 });
 // Endpoint para validar LMV-uppgifter rápidamente desde el cliente
 app.post('/lmv/validate', async (req, res) => {
-    const { apiKey, apiUsername, collectionId, apiType } = req.body;
+    const { apiKey, apiUsername, apiToken, collectionId, apiType } = req.body;
     const type = apiType || 'vektor';
-    if (!apiKey || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
+    // Accept either apiKey or apiToken
+    if (!(apiKey || apiToken) || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
 
     try {
-        const valid = await validateLmvCredentials(apiUsername, apiKey, type, collectionId);
+        const valid = await validateLmvCredentials(apiUsername, apiKey, apiToken, type, collectionId);
         if (!valid.ok) {
             const status = valid.status || 401;
             writeToLog(`[VALIDATE-ENDPOINT] Validering misslyckades (status: ${status}) för samling ${collectionId}`);

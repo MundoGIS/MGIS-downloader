@@ -206,34 +206,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Inicializar el mapa
     initializeMap();
     
-    // Cargar credenciales guardadas
-    const rememberCheckbox = document.getElementById('remember-credentials');
-    const savedUsername = localStorage.getItem('lmv_username');
-    const savedApiKey = localStorage.getItem('lmv_apikey');
-    const savedRemember = localStorage.getItem('lmv_remember');
-    
-    if (savedRemember === 'true' && savedUsername && savedApiKey) {
-        document.getElementById('apiUsername').value = savedUsername;
-        document.getElementById('apiKey').value = atob(savedApiKey);
-        rememberCheckbox.checked = true;
-    }
-    
-    // Guardar credenciales al cambiar checkbox
-    rememberCheckbox.addEventListener('change', function() {
-        if (this.checked) {
-            const username = document.getElementById('apiUsername').value;
-            const apiKey = document.getElementById('apiKey').value;
-            if (username && apiKey) {
-                localStorage.setItem('lmv_username', username);
-                localStorage.setItem('lmv_apikey', btoa(apiKey));
-                localStorage.setItem('lmv_remember', 'true');
-            }
-        } else {
-            localStorage.removeItem('lmv_username');
-            localStorage.removeItem('lmv_apikey');
-            localStorage.removeItem('lmv_remember');
-        }
-    });
+    // Nota: localStorage y visibilidad de campos ahora manejados por inline script en lmv.html
     
     // ===== EVENT LISTENERS =====
 
@@ -289,12 +262,17 @@ document.addEventListener('DOMContentLoaded', function() {
         clearMessages();
         disableButtons(true);
 
+        const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
         const apiUsername = document.getElementById('apiUsername').value.trim();
         const apiKey = document.getElementById('apiKey').value.trim();
+        const apiToken = document.getElementById('apiToken').value.trim();
         const collectionId = document.getElementById('collection-select').value;
-
-        if (!apiUsername) { showMessage('Vänligen ange ditt användarnamn.', 'error'); disableButtons(false); return; }
-        if (!apiKey) { showMessage('Vänligen ange din LMV STAC API Key.', 'error'); disableButtons(false); return; }
+        if (authMethod === 'userpass') {
+            if (!apiUsername) { showMessage('Vänligen ange ditt användarnamn.', 'error'); disableButtons(false); return; }
+            if (!apiKey) { showMessage('Vänligen ange din LMV STAC API Key.', 'error'); disableButtons(false); return; }
+        } else {
+            if (!apiToken) { showMessage('Vänligen ange din Auth token.', 'error'); disableButtons(false); return; }
+        }
         if (!collectionId) { showMessage('Vänligen välj en datakollektion.', 'error'); disableButtons(false); return; }
         // Verificar aceptación de licencia
         const selOpt = collectionSelect.selectedOptions[0];
@@ -315,6 +293,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const payload = {
             apiUsername,
             apiKey,
+            apiToken: apiToken || undefined,
             collectionId,
             apiType: 'vektor',
             geometry: geometry
@@ -334,7 +313,7 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 const vres = await fetch('/lmv/validate', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ apiUsername: payload.apiUsername, apiKey: payload.apiKey, collectionId: payload.collectionId, apiType: payload.apiType })
+                    body: JSON.stringify({ apiUsername: payload.apiUsername, apiKey: payload.apiKey, apiToken: payload.apiToken, collectionId: payload.collectionId, apiType: payload.apiType })
                 });
                 if (vres.status === 401 || vres.status === 403) {
                     showMessage('Fel: Ogiltigt användarnamn eller API-nyckel. Kontrollera dina uppgifter.', 'error');
