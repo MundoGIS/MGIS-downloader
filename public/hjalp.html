@@ -33,6 +33,20 @@
                     <h2 class="title is-4">LMV – Geotorget, Developer Portal & STAC</h2>
                     <p class="note">Följ dessa steg för att få teknisk åtkomst till Lantmäteriets STAC-tjänster.</p>
 
+                    <div class="notification is-danger">
+                        <strong>Viktigt:</strong> I vissa fall fungerar <em>inte</em> endast Consumer Key/Secret från API-portalen för att komma åt STAC-asset-länkar. Använd istället ert <strong>systemkonto</strong> (Geotorget användarnamn) tillsammans med den API-nyckel eller lösenord som organisationen tilldelat.
+                    </div>
+
+                    <div class="step-box">
+                        <strong>Exempel (kontroll av collections med curl):</strong>
+                        <pre style="background:#f6f6f6;padding:10px;border-radius:4px;overflow:auto;"><code>curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" "https://api.lantmateriet.se/stac-vektor/v1/collections"
+
+# För att testa åtkomst till en asset (partial GET):
+curl -u "SYSTEMUSER:API_KEY" -H "X-API-Key: API_KEY" -H "Range: bytes=0-1023" "https://api.lantmateriet.se/path/to/asset.tif"
+</code></pre>
+                        <p style="margin-top:6px;">Byt ut <em>SYSTEMUSER</em> och <em>API_KEY</em> mot ditt systemkontonamn och den nyckel/secret som du fått från din organisation eller via Geotorget.</p>
+                    </div>
+
                     <div class="content">
                         <ol>
                             <li class="step-box">
@@ -41,7 +55,7 @@
                             </li>
                             <li class="step-box">
                                 <strong>2. Skapa en App i Developer Portal</strong><br>
-                                Logga in på <a href="https://developer.lantmateriet.se/" target="_blank">Developer Portal</a> med dina Geotorget-uppgifter.
+                                Logga in på <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">Developer Portal</a> med dina Geotorget-uppgifter.
                                 <ul>
                                     <li>Gå till <strong>"Applications"</strong> → <strong>"Add New Application"</strong>.</li>
                                     <li>Sök upp API:erna (t.ex. <em>STAC Vektor</em>) och klicka på <strong>"Subscribe"</strong>.</li>
