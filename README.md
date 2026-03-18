@@ -76,10 +76,6 @@ Webbgränssnitt
 - Höjddata: `/lmv_hojd.html`
 - Nedladdningar: `/downloads.html`
 
-Säkerhet
-- Spara aldrig hemligheter i publika repo.
-- LocalStorage är inte krypterat — använd med försiktighet.
-
 Support
 - För frågor: info@mundogis.se
 
