@@ -4,9 +4,33 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "service:install": "node service.js",
+    "service:uninstall": "node uninstall.js"
   },
-  "keywords": ["lmv","lantmateriet","gbif","gis","gdal","downloader","mgis"],
+  "keywords": [
+    "lmv",
+    "lantmateriet",
+    "gbif",
+    "gis",
+    "gdal",
+    "downloader",
+    "mgis",
+    "sverige",
+    "sweden",
+    "geodata",
+    "stac",
+    "stac-api",
+    "qgis",
+    "artdata",
+    "geospatial",
+    "node",
+    "express",
+    "open-data",
+    "kartdata",
+    "vektordata",
+    "hojddata"
+  ],
   "author": "MundoGIS",
   "license": "MPL-2.0",
   "description": "ArtData och LMV data nedladdare",
@@ -25,10 +49,14 @@
   "dependencies": {
     "archiver": "^7.0.1",
     "axios": "^1.9.0",
+    "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.7.0",
     "node-cron": "^4.2.1",
-    "node-windows": "^1.0.0-beta.8",
     "unzipper": "^0.12.3"
+  },
+  "optionalDependencies": {
+    "node-windows": "^1.0.0-beta.8"
   }
 }

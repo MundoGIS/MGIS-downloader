@@ -6,6 +6,11 @@
  */
 
 
+if (process.platform !== 'win32') {
+  console.error('uninstall.js elimina un servicio de Windows. En Linux/macOS usa scripts/uninstall-linux-service.sh.');
+  process.exit(1);
+}
+
 const Service = require('node-windows').Service;
 
 // Crea un nuevo objeto de servicio

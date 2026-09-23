@@ -6,7 +6,7 @@ Tack för att du bryr dig om säkerheten i detta projekt. Läs nedan för hur du
 
 Om du hittar en säkerhetsrisk eller sårbarhet, kontakta oss gärna direkt så att vi kan hantera den på ett ansvarsfullt sätt.
 
-- Skicka ett e-postmeddelande till: info@mundogis.se
+- Skicka ett e-postmeddelande till: support@mundogis.se
 - Ange tydlig titel, en beskrivning av problemet, steg för att återskapa, och påverkan.
 
 Vi uppskattar att du ger oss rimlig tid att åtgärda problemet innan du delar det offentligt. Ange gärna om du önskar anonymitet.
@@ -30,4 +30,4 @@ Om problemet beror på ett externt beroende kommer vi att informera om vilka ver
 
 ## Kontakt
 
-info@mundogis.se
+support@mundogis.se

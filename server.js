@@ -5,7 +5,8 @@
  */
 require('dotenv').config();
 const express = require('express');
-const bodyParser = require('body-parser');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -20,7 +21,50 @@ const LAN_GEOJSON_PATH = path.join(__dirname, 'data', 'lan.geojson');
 
 const activeDownloads = new Map();
 
-app.use(bodyParser.json({ limit: '50mb' }));
+// --- SÄKERHETSKONFIGURATION (för drift bakom reverse proxy, t.ex. IIS + URL Rewrite) ---
+// TRUST_PROXY: antal hopp (hops) att lita på framför appen, t.ex. 1 om IIS/ARR ligger direkt framför Node.
+// Krävs för korrekt req.ip/X-Forwarded-For-hantering, vilket express-rate-limit använder.
+const TRUST_PROXY = process.env.TRUST_PROXY ? process.env.TRUST_PROXY.trim() : null;
+if (TRUST_PROXY) {
+    const trustProxyValue = /^\d+$/.test(TRUST_PROXY) ? parseInt(TRUST_PROXY, 10) : TRUST_PROXY;
+    app.set('trust proxy', trustProxyValue);
+}
+
+// ALLOWED_ORIGINS: kommaseparerad lista med tillåtna origins för CORS (t.ex. https://intranet.example.se).
+// Lämnas tom = samma-origin only (ingen CORS-header skickas, rekommenderas om appen bara nås via IIS-domänen).
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean);
+
+if (ALLOWED_ORIGINS.length > 0) {
+    app.use(cors({
+        origin(origin, callback) {
+            // Tillåt anrop utan Origin-header (t.ex. curl, server-till-server).
+            if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+            callback(new Error('CORS: origin ej tillåten.'));
+        }
+    }));
+}
+
+// Generell rate limit för hela API:t - skydd mot enkel DoS/skrapning.
+const apiLimiter = rateLimit({
+    windowMs: (process.env.RATE_LIMIT_WINDOW_MINUTES ? parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES, 10) : 15) * 60 * 1000,
+    max: process.env.RATE_LIMIT_MAX ? parseInt(process.env.RATE_LIMIT_MAX, 10) : 300,
+    standardHeaders: true,
+    legacyHeaders: false
+});
+// Striktare gräns för nedladdningsstartande rutter (tyngre operationer).
+const downloadLimiter = rateLimit({
+    windowMs: (process.env.DOWNLOAD_RATE_LIMIT_WINDOW_MINUTES ? parseInt(process.env.DOWNLOAD_RATE_LIMIT_WINDOW_MINUTES, 10) : 15) * 60 * 1000,
+    max: process.env.DOWNLOAD_RATE_LIMIT_MAX ? parseInt(process.env.DOWNLOAD_RATE_LIMIT_MAX, 10) : 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'För många nedladdningsförfrågningar. Försök igen senare.' }
+});
+app.use('/', apiLimiter);
+
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static('public'));
 
 // --- CONFIGURACIÓN ---
@@ -37,8 +81,11 @@ const GDAL_GDALINFO_CMD = path.join(
     process.platform === 'win32' ? 'gdalinfo.exe' : 'gdalinfo'
 );
 // Path to gdal_merge.py: prefer environment override via .env (GDAL_MERGE),
-// otherwise fall back to QGIS root or the legacy hard-coded path.
-const GDAL_MERGE_CMD = (process.env.GDAL_MERGE && process.env.GDAL_MERGE.trim()) || (QGIS_ROOT ? path.join(QGIS_ROOT, 'apps', 'Python312', 'Scripts', 'gdal_merge.py') : 'C:/QGIS/apps/Python312/Scripts/gdal_merge.py');
+// otherwise fall back to QGIS root or an OS-appropriate default (assumes gdal_merge.py is on PATH on Linux/macOS).
+const DEFAULT_GDAL_MERGE = process.platform === 'win32'
+    ? 'C:/QGIS/apps/Python312/Scripts/gdal_merge.py'
+    : 'gdal_merge.py';
+const GDAL_MERGE_CMD = (process.env.GDAL_MERGE && process.env.GDAL_MERGE.trim()) || (QGIS_ROOT ? path.join(QGIS_ROOT, 'apps', 'Python312', 'Scripts', 'gdal_merge.py') : DEFAULT_GDAL_MERGE);
 console.log('GDAL_MERGE_CMD =', GDAL_MERGE_CMD);
 const GDAL_TRANSLATE_CMD = path.join(
     GDAL_BIN,
@@ -48,7 +95,12 @@ const GDAL_ADDO_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdaladdo.exe' : 'gdaladdo'
 );
-const PYTHON_CMD = QGIS_ROOT ? path.join(QGIS_ROOT, 'python-qgis-ltr.bat') : 'python';
+// Python interpreter used to run gdal_merge.py: allow override via .env (PYTHON_CMD),
+// otherwise use the QGIS-bundled Python on Windows or 'python3' on Linux/macOS.
+const PYTHON_CMD = (process.env.PYTHON_CMD && process.env.PYTHON_CMD.trim())
+    || (QGIS_ROOT
+        ? path.join(QGIS_ROOT, process.platform === 'win32' ? 'python-qgis-ltr.bat' : 'python3')
+        : (process.platform === 'win32' ? 'python' : 'python3'));
 
 // --- UTILIDADES ---
 const logFile = path.join(__dirname, 'process.log');
@@ -113,9 +165,8 @@ function runGdalMerge(targetDir, tifFiles, outputName) {
         // Crear lista de archivos para evitar límite de línea de comando
         const mergeListPath = path.join(targetDir, 'merge_list.txt');
         fs.writeFileSync(mergeListPath, tifFiles.join('\n'));
-        
-        const args = [
-            '/c', PYTHON_CMD,
+
+        const mergeArgs = [
             GDAL_MERGE_CMD, '-o', outputName,
             '--optfile', 'merge_list.txt',
             '-co', 'COMPRESS=DEFLATE',
@@ -123,7 +174,11 @@ function runGdalMerge(targetDir, tifFiles, outputName) {
             '-co', 'TILED=YES',
             '-co', 'BIGTIFF=IF_SAFER'
         ];
-        const child = spawn('cmd.exe', args, { cwd: targetDir, windowsHide: true });
+        // On Windows run via cmd.exe so .bat interpreters (e.g. python-qgis-ltr.bat) work correctly.
+        const [cmd, args] = process.platform === 'win32'
+            ? ['cmd.exe', ['/c', PYTHON_CMD, ...mergeArgs]]
+            : [PYTHON_CMD, mergeArgs];
+        const child = spawn(cmd, args, { cwd: targetDir, windowsHide: true });
         let stderr = '';
         child.stderr.on('data', chunk => { stderr += chunk.toString(); });
         child.on('error', err => reject(err));
@@ -369,6 +424,9 @@ app.post('/check-species', async (req, res) => {
             error: 'Faltan parámetros: username, password y speciesName son requeridos' 
         });
     }
+    if (typeof speciesName !== 'string' || speciesName.length > 255) {
+        return res.status(400).json({ success: false, error: 'Ogiltigt artnamn.' });
+    }
 
     try {
         // Sök art i GBIF Species API
@@ -393,11 +451,10 @@ app.post('/check-species', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Fel vid verifiering av art:', error.message);
+        writeToLog(`[GBIF] Fel vid verifiering av art: ${error.message}`);
         res.status(500).json({
             success: false,
-            error: 'Fel vid verifiering av art i GBIF',
-            details: error.message
+            error: 'Fel vid verifiering av art i GBIF'
         });
     }
 });
@@ -451,17 +508,16 @@ app.post('/get-occurrence-count', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Fel vid hämtning av förekomstantal:', error.message);
+        writeToLog(`[GBIF] Fel vid hämtning av förekomstantal: ${error.message}`);
         res.status(500).json({
             success: false,
-            error: 'Fel vid hämtning av förekomstantal från GBIF',
-            details: error.message
+            error: 'Fel vid hämtning av förekomstantal från GBIF'
         });
     }
 });
 
 // Endpoint para crear una descarga en GBIF
-app.post('/create-download', async (req, res) => {
+app.post('/create-download', downloadLimiter, async (req, res) => {
     const { username, password, speciesKey, geometry, basisOfRecord } = req.body;
     
     if (!username || !password || !speciesKey || !geometry) {
@@ -532,11 +588,10 @@ app.post('/create-download', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Fel vid skapande av nedladdning:', error.message);
+        writeToLog(`[GBIF] Fel vid skapande av nedladdning: ${error.message} - ${JSON.stringify(error.response?.data || {})}`);
         res.status(500).json({
             success: false,
-            error: 'Fel vid skapande av nedladdning i GBIF',
-            details: error.response?.data || error.message
+            error: 'Fel vid skapande av nedladdning i GBIF. Kontrollera dina uppgifter och försök igen.'
         });
     }
 });
@@ -549,7 +604,8 @@ app.get('/lmv/collections', async (req, res) => {
         const response = await axios.get('https://api.lantmateriet.se/stac-vektor/v1/collections');
         res.json({ success: true, collections: response.data.collections });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        writeToLog(`[LMV] Fel vid hämtning av vektor-collections: ${error.message}`);
+        res.status(502).json({ success: false, error: 'Kunde inte hämta collections från Lantmäteriet.' });
     }
 });
 
@@ -571,7 +627,8 @@ app.get('/lmv/hojd/collections', async (req, res) => {
         });
         res.json({ success: true, collections: response.data.collections });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        writeToLog(`[LMV] Fel vid hämtning av höjd-collections: ${error.message}`);
+        res.status(502).json({ success: false, error: 'Kunde inte hämta collections från Lantmäteriet.' });
     }
 });
 
@@ -893,7 +950,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
 }
 
 // --- RUTA DE INICIO DE DESCARGA ---
-app.post('/lmv/start-full-download', async (req, res) => {
+app.post('/lmv/start-full-download', downloadLimiter, async (req, res) => {
     const { apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel } = req.body;
 
     // Standardvärde: om apiType saknas används 'vektor' (bakåtkompatibilitet)
@@ -901,6 +958,11 @@ app.post('/lmv/start-full-download', async (req, res) => {
 
     // Accept either apiKey or apiToken when using token-based auth
     if (!(apiKey || apiToken) || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
+
+    // collectionId blir en del av ett mappnamn på disk - tillåt bara säkra tecken för att stoppa path traversal.
+    if (typeof collectionId !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(collectionId)) {
+        return res.status(400).json({ success: false, error: 'Ogiltigt collectionId.' });
+    }
 
     // Validar credenciales antes de iniciar cualquier proceso en background
     try {
@@ -1035,17 +1097,22 @@ app.get('/lmv/downloads/list', (req, res) => {
         
         res.json({ success: true, downloads });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        writeToLog(`[DOWNLOADS-LIST] Fel: ${error.message}`);
+        res.status(500).json({ success: false, error: 'Kunde inte l\u00e4sa listan \u00f6ver nedladdningar.' });
     }
 });
 
 app.get('/lmv/downloads/download/:folderName', (req, res) => {
     const folderName = req.params.folderName;
-    if (!folderName.startsWith('LMV_DOWNLOADS_')) {
+    // Endast bokstäver, siffror, understreck och bindestreck tillåts - blockerar path traversal (../, /, \\).
+    if (!/^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(folderName)) {
         return res.status(400).json({ success: false, error: 'Ogiltigt mappnamn' });
     }
-    
+
     const folderPath = path.join(__dirname, folderName);
+    if (path.dirname(folderPath) !== __dirname) {
+        return res.status(400).json({ success: false, error: 'Ogiltigt mappnamn' });
+    }
     if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
         return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
     }
@@ -1067,11 +1134,15 @@ app.get('/lmv/downloads/download/:folderName', (req, res) => {
 
 app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
     const folderName = req.params.folderName;
-    if (!folderName.startsWith('LMV_DOWNLOADS_')) {
+    // Endast bokstäver, siffror, understreck och bindestreck tillåts - blockerar path traversal (../, /, \\).
+    if (!/^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(folderName)) {
         return res.status(400).json({ success: false, error: 'Ogiltigt mappnamn' });
     }
-    
+
     const folderPath = path.join(__dirname, folderName);
+    if (path.dirname(folderPath) !== __dirname) {
+        return res.status(400).json({ success: false, error: 'Ogiltigt mappnamn' });
+    }
     if (!fs.existsSync(folderPath)) {
         return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
     }
@@ -1081,15 +1152,21 @@ app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
         writeToLog(`[DELETE] Mapp raderad: ${folderName}`);
         res.json({ success: true, message: 'Mappen raderades' });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        writeToLog(`[DELETE] Fel vid radering av ${folderName}: ${error.message}`);
+        res.status(500).json({ success: false, error: 'Kunde inte radera mappen.' });
     }
 });
 
-app.listen(port, () => {
-    console.log(`Servern körs på http://localhost:${port}`);
-    console.log(`- Vektor:    http://localhost:${port}/lmv.html`);
-    console.log(`- Höjd:      http://localhost:${port}/lmv_hojd.html`);
-    console.log(`- Nedladdningar: http://localhost:${port}/downloads.html`);
+// HOST: nätverksgränssnitt att lyssna på. Standard 127.0.0.1 (endast lokal åtkomst),
+// vilket rekommenderas när appen körs bakom en reverse proxy som IIS + URL Rewrite/ARR.
+// Sätt HOST=0.0.0.0 endast om Node ska nås direkt utan proxy framför.
+const HOST = process.env.HOST ? process.env.HOST.trim() : '127.0.0.1';
+
+app.listen(port, HOST, () => {
+    console.log(`Servern körs på http://${HOST}:${port}`);
+    console.log(`- Vektor:    http://${HOST}:${port}/lmv.html`);
+    console.log(`- Höjd:      http://${HOST}:${port}/lmv_hojd.html`);
+    console.log(`- Nedladdningar: http://${HOST}:${port}/downloads.html`);
 });
 // Endpoint para validar LMV-uppgifter rápidamente desde el cliente
 app.post('/lmv/validate', async (req, res) => {
