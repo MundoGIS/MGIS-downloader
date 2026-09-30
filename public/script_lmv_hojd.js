@@ -304,7 +304,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 const json = await res.json();
                 if (json.success) {
-                    showMsg(json.message, 'success');
+                    showMsg(`${json.message} Följ förloppet live under 📦 Nedladdningar.`, 'success');
                     if (json.downloadId) {
                         currentDownloadId = json.downloadId;
                         stopBtn.style.display = 'inline-block';

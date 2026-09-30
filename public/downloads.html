@@ -5,11 +5,45 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nedladdningshanterare - LMV</title>
     <link rel="stylesheet" href="css/style.css">
+    <style>
+        .jobs-section { margin-bottom: 30px; }
+        .jobs-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .jobs-section-header h2 { font-size: 1.2em; color: #333; margin: 0; }
+        .job-card { border: 1px solid #dee2e6; border-left: 5px solid #667eea; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; background: #fff; }
+        .job-card.status-stopping { border-left-color: #fd7e14; }
+        .job-card.status-done { border-left-color: #28a745; }
+        .job-card.status-cancelled { border-left-color: #6c757d; }
+        .job-card.status-failed { border-left-color: #dc3545; }
+        .job-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .job-title { font-weight: 600; color: #333; }
+        .job-sub { font-size: 0.85em; color: #6c757d; margin-top: 2px; }
+        .job-status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85em; font-weight: 600; padding: 3px 10px; border-radius: 12px; }
+        .job-status.running { background: #e8eaff; color: #3f4bb8; }
+        .job-status.stopping { background: #fff3e0; color: #b35900; }
+        .job-status.done { background: #d4edda; color: #155724; }
+        .job-status.cancelled { background: #e9ecef; color: #495057; }
+        .job-status.failed { background: #f8d7da; color: #721c24; }
+        .mini-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(0,0,0,0.15); border-top-color: currentColor; border-radius: 50%; animation: spin 0.9s linear infinite; }
+        .job-progress { margin-top: 10px; }
+        .job-bar { height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; }
+        .job-bar-fill { height: 100%; background: #667eea; transition: width 0.4s; }
+        .job-bar-fill.indeterminate { width: 30% !important; animation: slide 1.2s ease-in-out infinite; }
+        @keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+        .job-detail { font-size: 0.85em; color: #555; margin-top: 6px; }
+        .job-message { margin-top: 8px; font-size: 0.95em; }
+        .badge-running { background: #e8eaff; color: #3f4bb8; display: inline-flex; align-items: center; gap: 5px; }
+        .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+        #toast { position: fixed; right: 20px; bottom: 20px; max-width: 460px; z-index: 9999; display: none; padding: 14px 18px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.2); color: #fff; font-size: 0.95em; }
+        #toast.done { background: #28a745; }
+        #toast.cancelled { background: #6c757d; }
+        #toast.failed { background: #dc3545; }
+        #toast .toast-close { float: right; margin-left: 12px; cursor: pointer; font-weight: bold; }
+    </style>
 </head>
 <body class="downloads-page">
     <header class="main-header">
         <div class="brand-wrap">
-            <img src="images/MGIS-logo_azul.png" alt="MGIS logo" class="site-logo">
+            <img src="images/MGIS-logo_azul.png" alt="logo" class="site-logo">
             <div class="brand">LMV Data Downloader</div>
         </div>
         <nav>
@@ -46,6 +80,14 @@
         </div>
         
         <div class="content">
+            <div id="jobsSection" class="jobs-section" style="display: none;">
+                <div class="jobs-section-header">
+                    <h2>⏱️ Pågående och senaste jobb</h2>
+                    <button class="btn btn-secondary btn-sm" id="clearFinishedBtn" onclick="dismissFinishedJobs()" style="display: none;">Dölj avslutade</button>
+                </div>
+                <div id="jobsList"></div>
+            </div>
+
             <div id="loadingState" class="loading">
                 <div class="spinner"></div>
                 <p>Laddar nedladdningar...</p>
@@ -62,8 +104,33 @@
         </div>
     </div>
 
+    <div id="toast" role="status" aria-live="polite"></div>
+
     <script>
         let downloads = [];
+        let jobs = [];
+        const knownJobStatus = new Map();
+        let firstJobsPoll = true;
+        let lastFolderRefresh = 0;
+        const DISMISSED_KEY = 'mgis_dismissed_jobs';
+
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function getDismissed() {
+            try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY) || '[]')); } catch (e) { return new Set(); }
+        }
+
+        function isActive(job) {
+            return job.status === 'running' || job.status === 'stopping';
+        }
+
+        function activeJobForFolder(folderName) {
+            return jobs.find(j => isActive(j) && j.folders.includes(folderName)) || null;
+        }
         
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -123,12 +190,16 @@
             document.getElementById('totalSize').textContent = formatBytes(totalSize);
             
             // Renderizar tarjetas
-            grid.innerHTML = downloads.map(download => `
+            grid.innerHTML = downloads.map(download => {
+                const activeJob = activeJobForFolder(download.name);
+                const lock = activeJob ? 'disabled title="Mappen används av en pågående nedladdning"' : '';
+                return `
                 <div class="download-card">
                     <div class="download-header">
                         <div style="flex: 1;">
-                            <div class="download-title">${download.name}</div>
+                            <div class="download-title">${escapeHtml(download.name)}</div>
                             <div class="download-badges">
+                                ${activeJob ? `<span class="badge badge-running"><span class="mini-spinner"></span>${activeJob.status === 'stopping' ? 'Stoppas' : 'Pågår'}</span>` : ''}
                                 ${download.hasMerged ? '<span class="badge badge-success">✓ Merged</span>' : ''}
                                 ${download.hasVrt ? '<span class="badge badge-info">✓ VRT</span>' : ''}
                                 ${download.hasTileIndex ? '<span class="badge badge-info">✓ Index</span>' : ''}
@@ -156,15 +227,20 @@
                     </div>
                     
                     <div class="download-actions">
-                        <button class="btn btn-success btn-sm" onclick="downloadFolder('${download.name}')">
+                        ${activeJob ? `
+                        <button class="btn btn-danger btn-sm" onclick="stopJob('${escapeHtml(activeJob.id)}')" ${activeJob.status === 'stopping' ? 'disabled' : ''}>
+                            ⏹ Stoppa nedladdning
+                        </button>` : ''}
+                        <button class="btn btn-success btn-sm" onclick="downloadFolder('${escapeHtml(download.name)}')" ${lock}>
                             ⬇️ Ladda ner ZIP
                         </button>
-                        <button class="btn btn-danger btn-sm" onclick="deleteFolder('${download.name}')">
+                        <button class="btn btn-danger btn-sm" onclick="deleteFolder('${escapeHtml(download.name)}')" ${lock}>
                             🗑️ Ta bort
                         </button>
                     </div>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         }
         
         function downloadFolder(folderName) {
@@ -202,9 +278,161 @@
             document.getElementById('emptyState').style.display = 'none';
             loadDownloads();
         }
+
+        // --- LIVE JOBB ---
+        const PHASE_TEXT = {
+            start: 'Startar...',
+            search: 'Söker filer hos Lantmäteriet...',
+            download: 'Laddar ner',
+            optimize: 'Slutför optimering (COG)...',
+            vrt: 'Skapar VRT för QGIS...',
+            finished: 'Klar'
+        };
+        const STATUS_TEXT = { running: 'Pågår', stopping: 'Stoppas...', done: 'Klar', cancelled: 'Stoppad', failed: 'Misslyckades' };
+
+        function jobTitle(job) {
+            const kind = job.type === 'hojd' ? '🗺️ Höjddata' : `📍 Vektordata (${job.collectionId})`;
+            return `${kind} – ${job.label}`;
+        }
+
+        function renderJobProgress(job) {
+            const p = job.progress || {};
+            if (!isActive(job)) return '';
+            const lines = [];
+            if (p.collectionCount) lines.push(`Samling ${p.collectionIndex}/${p.collectionCount}${p.collection ? `: ${p.collection}` : ''}`);
+            else if (p.collection) lines.push(`Samling: ${p.collection}`);
+
+            let pct = null;
+            if (p.phase === 'search') {
+                lines.push(`${PHASE_TEXT.search} ${p.found ? `(${p.found} hittade hittills)` : ''}`);
+            } else if (p.phase === 'download' && p.total) {
+                pct = Math.round((p.done / p.total) * 100);
+                lines.push(`Filer: ${p.done}/${p.total} – ${p.existing || 0} fanns redan, ${p.downloaded || 0} nya${p.failed ? `, ${p.failed} misslyckade` : ''}`);
+            } else {
+                lines.push(PHASE_TEXT[p.phase] || '');
+            }
+            if (job.type === 'hojd' && (p.optimized || p.optimizeWaiting)) {
+                lines.push(`Optimering (COG): ${p.optimized} klara, ${p.optimizeWaiting} i kö`);
+            }
+            const fill = pct === null
+                ? '<div class="job-bar-fill indeterminate"></div>'
+                : `<div class="job-bar-fill" style="width:${pct}%"></div>`;
+            return `
+                <div class="job-progress">
+                    <div class="job-bar">${fill}</div>
+                    ${lines.filter(Boolean).map(l => `<div class="job-detail">${escapeHtml(l)}</div>`).join('')}
+                </div>`;
+        }
+
+        function renderJobs() {
+            const section = document.getElementById('jobsSection');
+            const list = document.getElementById('jobsList');
+            const dismissed = getDismissed();
+            const visible = jobs.filter(j => isActive(j) || !dismissed.has(j.id));
+            section.style.display = visible.length ? 'block' : 'none';
+            document.getElementById('clearFinishedBtn').style.display = visible.some(j => !isActive(j)) ? 'inline-block' : 'none';
+
+            list.innerHTML = visible.map(job => {
+                const active = isActive(job);
+                const statusIcon = active ? '<span class="mini-spinner"></span>' : '';
+                const stopBtn = active
+                    ? `<button class="btn btn-danger btn-sm" onclick="stopJob('${escapeHtml(job.id)}')" ${job.status === 'stopping' ? 'disabled' : ''}>⏹ Stoppa</button>`
+                    : `<button class="btn btn-secondary btn-sm" onclick="dismissJob('${escapeHtml(job.id)}')">Dölj</button>`;
+                const when = job.finishedAt ? `Avslutad ${formatDate(job.finishedAt)}` : `Startad ${formatDate(job.startedAt)}`;
+                return `
+                    <div class="job-card status-${escapeHtml(job.status)}">
+                        <div class="job-top">
+                            <div>
+                                <div class="job-title">${escapeHtml(jobTitle(job))}</div>
+                                <div class="job-sub">${escapeHtml(when)}</div>
+                            </div>
+                            <div style="display:flex; gap:8px; align-items:center;">
+                                <span class="job-status ${escapeHtml(job.status)}">${statusIcon}${escapeHtml(STATUS_TEXT[job.status] || job.status)}</span>
+                                ${stopBtn}
+                            </div>
+                        </div>
+                        ${renderJobProgress(job)}
+                        ${job.message ? `<div class="job-message">${escapeHtml(job.message)}</div>` : ''}
+                    </div>`;
+            }).join('');
+        }
+
+        function showToast(job) {
+            const toast = document.getElementById('toast');
+            toast.className = job.status;
+            toast.innerHTML = `<span class="toast-close" onclick="this.parentElement.style.display='none'">✕</span>${escapeHtml(job.message)}`;
+            toast.style.display = 'block';
+            clearTimeout(toast._timer);
+            toast._timer = setTimeout(() => { toast.style.display = 'none'; }, 15000);
+        }
+
+        async function pollJobs() {
+            try {
+                const res = await fetch('/lmv/jobs');
+                const data = await res.json();
+                if (data.success) {
+                    jobs = data.jobs;
+                    let justFinished = false;
+                    for (const job of jobs) {
+                        const prev = knownJobStatus.get(job.id);
+                        if (!firstJobsPoll && prev && isActive({ status: prev }) && !isActive(job)) {
+                            justFinished = true;
+                            showToast(job);
+                        }
+                        knownJobStatus.set(job.id, job.status);
+                    }
+                    firstJobsPoll = false;
+                    renderJobs();
+
+                    const anyActive = jobs.some(isActive);
+                    if (justFinished || (anyActive && Date.now() - lastFolderRefresh > 5000)) {
+                        lastFolderRefresh = Date.now();
+                        await loadDownloads();
+                    } else if (downloads.length) {
+                        renderDownloads();
+                    }
+                }
+            } catch (e) {
+                console.warn('Kunde inte hämta jobbstatus:', e.message);
+            } finally {
+                setTimeout(pollJobs, 2000);
+            }
+        }
+
+        async function stopJob(jobId) {
+            if (!confirm('Vill du stoppa nedladdningen? Pågående optimering stoppas också. Redan nedladdade filer finns kvar.')) return;
+            try {
+                const res = await fetch('/lmv/cancel-download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ downloadId: jobId })
+                });
+                const data = await res.json();
+                if (!data.success) alert(data.error || 'Kunde inte stoppa jobbet.');
+                const job = jobs.find(j => j.id === jobId);
+                if (job && data.success) { job.status = 'stopping'; renderJobs(); renderDownloads(); }
+            } catch (e) {
+                alert('Nätverksfel vid stopp: ' + e.message);
+            }
+        }
+
+        function dismissJob(jobId) {
+            const dismissed = getDismissed();
+            dismissed.add(jobId);
+            localStorage.setItem(DISMISSED_KEY, JSON.stringify([...dismissed]));
+            renderJobs();
+        }
+
+        function dismissFinishedJobs() {
+            const dismissed = getDismissed();
+            jobs.filter(j => !isActive(j)).forEach(j => dismissed.add(j.id));
+            localStorage.setItem(DISMISSED_KEY, JSON.stringify([...dismissed]));
+            renderJobs();
+        }
         
         // Cargar al inicio
         loadDownloads();
+        pollJobs();
     </script>
 </body>
 </html>

@@ -77,6 +77,6 @@ Webbgränssnitt
 - Nedladdningar: `/downloads.html`
 
 Support
-- För frågor: info@mundogis.se
+- För frågor: support@mundogis.se
 
 Utvecklad av MundoGIS

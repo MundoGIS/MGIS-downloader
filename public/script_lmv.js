@@ -336,7 +336,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             const json = await res.json();
             if (json.success) {
-                showMessage(json.message || 'Nedladdning startad i bakgrunden.', 'success');
+                showMessage(`${json.message || 'Nedladdning startad i bakgrunden.'} Följ förloppet live under 📦 Nedladdningar.`, 'success');
                 if (json.downloadId) {
                     currentDownloadId = json.downloadId;
                     if (stopBtn) stopBtn.style.display = 'inline-block';

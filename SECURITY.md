@@ -30,4 +30,4 @@ Om problemet beror på ett externt beroende kommer vi att informera om vilka ver
 
 ## Kontakt
 
-info@mundogis.se
+support@mundogis.se

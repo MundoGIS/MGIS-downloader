@@ -15,10 +15,11 @@ const unzipper = require('unzipper');
 const { spawn } = require('child_process');
 const archiver = require('archiver');
 const app = express();
-const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3003;
+const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3004;
 const LAN_GEOJSON_PATH = path.join(__dirname, 'data', 'lan.geojson');
 
-const activeDownloads = new Map();
+const jobs = new Map();
+const FINISHED_JOB_TTL_MS = 12 * 60 * 60 * 1000;
 
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('public'));
@@ -36,19 +37,20 @@ const GDAL_GDALINFO_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdalinfo.exe' : 'gdalinfo'
 );
-// Path to gdal_merge.py: prefer environment override via .env (GDAL_MERGE),
-// otherwise fall back to QGIS root or the legacy hard-coded path.
-const GDAL_MERGE_CMD = (process.env.GDAL_MERGE && process.env.GDAL_MERGE.trim()) || (QGIS_ROOT ? path.join(QGIS_ROOT, 'apps', 'Python312', 'Scripts', 'gdal_merge.py') : 'C:/QGIS/apps/Python312/Scripts/gdal_merge.py');
-console.log('GDAL_MERGE_CMD =', GDAL_MERGE_CMD);
 const GDAL_TRANSLATE_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdal_translate.exe' : 'gdal_translate'
 );
-const GDAL_ADDO_CMD = path.join(
-    GDAL_BIN,
-    process.platform === 'win32' ? 'gdaladdo.exe' : 'gdaladdo'
-);
-const PYTHON_CMD = QGIS_ROOT ? path.join(QGIS_ROOT, 'python-qgis-ltr.bat') : 'python';
+const MANIFEST_NAME = 'manifest.json';
+const COMBINED_HOJD_FOLDER = 'LMV_DOWNLOADS_markhojd';
+
+// Standalone GDAL exes need these to resolve CRS (SWEREF99 TM) outside the QGIS shell.
+const GDAL_ENV = { ...process.env };
+const gdalDataDir = GDAL_ROOT ? path.join(GDAL_ROOT, 'share', 'gdal') : null;
+const projDataDir = QGIS_ROOT ? path.join(QGIS_ROOT, '..', 'share', 'proj') : null;
+if (gdalDataDir && fs.existsSync(gdalDataDir)) GDAL_ENV.GDAL_DATA = gdalDataDir;
+if (projDataDir && fs.existsSync(projDataDir)) GDAL_ENV.PROJ_DATA = GDAL_ENV.PROJ_LIB = projDataDir;
+if (!fs.existsSync(GDAL_TRANSLATE_CMD)) console.warn(`VARNING: gdal_translate hittades inte: ${GDAL_TRANSLATE_CMD}. Kontrollera QGIS i .env.`);
 
 // --- UTILIDADES ---
 const logFile = path.join(__dirname, 'process.log');
@@ -65,11 +67,21 @@ function writeToLog(message) {
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+function abortableDelay(ms, signal) {
+    if (!signal) return delay(ms);
+    return new Promise(resolve => {
+        if (signal.aborted) return resolve();
+        const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+        const onAbort = () => { clearTimeout(timer); resolve(); };
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
+
 function runGdalBuildVrt(targetDir, listFileName = 'filelist.txt', outputName = 'index.vrt') {
     return new Promise((resolve, reject) => {
         const exe = GDAL_BUILDVRT_CMD;
         const args = ['-input_file_list', listFileName, outputName];
-        const child = spawn(exe, args, { cwd: targetDir, windowsHide: true });
+        const child = spawn(exe, args, { cwd: targetDir, windowsHide: true, env: GDAL_ENV });
         let stderr = '';
 
         child.stderr.on('data', chunk => { stderr += chunk.toString(); });
@@ -83,7 +95,7 @@ function runGdalBuildVrt(targetDir, listFileName = 'filelist.txt', outputName = 
 
 function runGdalInfo(rasterPath) {
     return new Promise((resolve, reject) => {
-        const child = spawn(GDAL_GDALINFO_CMD, ['-stats', rasterPath], { windowsHide: true });
+        const child = spawn(GDAL_GDALINFO_CMD, ['-approx_stats', rasterPath], { windowsHide: true, env: GDAL_ENV });
         let stdout = '';
         let stderr = '';
 
@@ -108,58 +120,206 @@ function runGdalInfo(rasterPath) {
     });
 }
 
-function runGdalMerge(targetDir, tifFiles, outputName) {
-    return new Promise((resolve, reject) => {
-        // Crear lista de archivos para evitar límite de línea de comando
-        const mergeListPath = path.join(targetDir, 'merge_list.txt');
-        fs.writeFileSync(mergeListPath, tifFiles.join('\n'));
-        
-        const args = [
-            '/c', PYTHON_CMD,
-            GDAL_MERGE_CMD, '-o', outputName,
-            '--optfile', 'merge_list.txt',
-            '-co', 'COMPRESS=DEFLATE',
-            '-co', 'PREDICTOR=2',
-            '-co', 'TILED=YES',
-            '-co', 'BIGTIFF=IF_SAFER'
-        ];
-        const child = spawn('cmd.exe', args, { cwd: targetDir, windowsHide: true });
-        let stderr = '';
-        child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-        child.on('error', err => reject(err));
-        child.on('close', code => {
-            if (code === 0) return resolve();
-            reject(new Error(stderr.trim() || `gdal_merge.py exited with code ${code}`));
-        });
-    });
+// PREDICTOR=2 matches LMV's own encoding and compresses their Float32 DEM better than PREDICTOR=3.
+function cogArgs(inputFile, outputFile) {
+    return [
+        '-of', 'COG',
+        '-co', 'COMPRESS=DEFLATE',
+        '-co', 'PREDICTOR=2',
+        '-co', 'RESAMPLING=AVERAGE',
+        '-co', 'BIGTIFF=IF_SAFER',
+        '-co', 'NUM_THREADS=ALL_CPUS',
+        inputFile, outputFile
+    ];
 }
 
-function runGdalTranslate(targetDir, inputFile, outputFile) {
+function cogCommandString(filename) {
+    return ['gdal_translate', ...cogArgs(filename, `${filename}.cog.tmp`)].join(' ');
+}
+
+function runGdalToCog(targetDir, inputFile, outputFile, signal) {
     return new Promise((resolve, reject) => {
-        const args = [inputFile, outputFile, '-co', 'COMPRESS=LZW', '-co', 'TILED=YES', '-co', 'BIGTIFF=YES'];
-        const child = spawn(GDAL_TRANSLATE_CMD, args, { cwd: targetDir, windowsHide: true });
+        const child = spawn(GDAL_TRANSLATE_CMD, cogArgs(inputFile, outputFile), { cwd: targetDir, windowsHide: true, env: GDAL_ENV, signal });
         let stderr = '';
+        let abortError = null;
         child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-        child.on('error', err => reject(err));
+        // On abort, reject only after the process has exited so Windows releases the output file first.
+        child.on('error', err => { if (err.name === 'AbortError') abortError = err; else reject(err); });
         child.on('close', code => {
+            if (abortError) return reject(abortError);
             if (code === 0) return resolve();
             reject(new Error(stderr.trim() || `gdal_translate exited with code ${code}`));
         });
     });
 }
 
-function runGdalAddo(targetDir, rasterPath) {
-    return new Promise((resolve, reject) => {
-        const args = ['-r', 'average', rasterPath, '2', '4', '8', '16', '32'];
-        const child = spawn(GDAL_ADDO_CMD, args, { cwd: targetDir, windowsHide: true });
-        let stderr = '';
-        child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-        child.on('error', err => reject(err));
+// LMV already delivers DEFLATE COGs with overviews; re-encoding those only makes them bigger.
+function isAlreadyCog(rasterPath, signal) {
+    return new Promise((resolve) => {
+        const child = spawn(GDAL_GDALINFO_CMD, [rasterPath], { windowsHide: true, env: GDAL_ENV, signal });
+        let stdout = '';
+        child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+        child.on('error', () => resolve(false));
         child.on('close', code => {
-            if (code === 0) return resolve();
-            reject(new Error(stderr.trim() || `gdaladdo exited with code ${code}`));
+            resolve(code === 0 && /LAYOUT=COG/.test(stdout) && /COMPRESSION=/.test(stdout) && /Overviews:/.test(stdout));
         });
     });
+}
+
+// Manifest is reconciled with disk on load: missing files are dropped, unknown .tif files are adopted.
+function loadManifest(folder, collectionId) {
+    let manifest = { collectionId, tiles: {} };
+    try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(folder, MANIFEST_NAME), 'utf8'));
+        if (parsed && parsed.tiles) manifest = parsed;
+    } catch (err) {
+        if (err.code !== 'ENOENT') writeToLog(`[${collectionId}] Kunde inte läsa ${MANIFEST_NAME} (${err.message}); bygger om från befintliga filer.`);
+    }
+    if (!fs.existsSync(folder)) return manifest;
+
+    const onDisk = new Set(fs.readdirSync(folder).filter(f => /\.tiff?$/i.test(f) && !f.startsWith('merged_')));
+    for (const name of Object.keys(manifest.tiles)) {
+        if (!onDisk.has(name)) delete manifest.tiles[name];
+    }
+    for (const name of onDisk) {
+        if (!manifest.tiles[name]) {
+            manifest.tiles[name] = { filename: name, downloaded: true, optimized: false, command: cogCommandString(name) };
+        }
+    }
+    return manifest;
+}
+
+function saveManifest(folder, manifest) {
+    if (!fs.existsSync(folder)) return;
+    manifest.updatedAt = new Date().toISOString();
+    const target = path.join(folder, MANIFEST_NAME);
+    fs.writeFileSync(`${target}.tmp`, JSON.stringify(manifest, null, 1));
+    fs.renameSync(`${target}.tmp`, target);
+}
+
+// Runs COG check/conversion in parallel with downloads; manifest updates stay on the single JS thread.
+// Aborting the signal kills running gdal processes; the original tile is untouched until the final rename.
+function createTileProcessor(folder, collectionId, manifest, signal, concurrency = 2) {
+    const queue = [];
+    const queued = new Set();
+    const stats = { converted: 0, alreadyCog: 0, failed: 0, bytesBefore: 0, bytesAfter: 0 };
+    let active = 0;
+    let stopped = false;
+    let idleWaiters = [];
+
+    const processed = () => stats.converted + stats.alreadyCog + stats.failed;
+
+    function notifyIfIdle() {
+        if (active === 0 && queue.length === 0) {
+            idleWaiters.forEach(resolve => resolve());
+            idleWaiters = [];
+        }
+    }
+
+    async function processTile(tile) {
+        const src = path.join(folder, tile.filename);
+        const tmp = `${src}.cog.tmp`;
+        const aborted = () => signal && signal.aborted;
+        try {
+            if (aborted()) return;
+            const cogAlready = await isAlreadyCog(src, signal);
+            if (aborted()) return;
+            if (cogAlready) {
+                tile.optimizedBy = 'source-cog';
+                stats.alreadyCog++;
+            } else {
+                const sizeBefore = fs.statSync(src).size;
+                await runGdalToCog(folder, tile.filename, path.basename(tmp), signal);
+                fs.renameSync(tmp, src);
+                stats.bytesBefore += sizeBefore;
+                stats.bytesAfter += fs.statSync(src).size;
+                tile.optimizedBy = 'gdal_translate';
+                stats.converted++;
+            }
+            tile.optimized = true;
+            tile.optimizedAt = new Date().toISOString();
+            delete tile.error;
+        } catch (err) {
+            try { fs.rmSync(tmp, { force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) {}
+            if (aborted() || err.name === 'AbortError') return;
+            if (err.code === 'ENOENT' && err.syscall && err.syscall.startsWith('spawn')) {
+                writeToLog(`[${collectionId}] gdal_translate/gdalinfo hittades inte (${GDAL_TRANSLATE_CMD}). Kontrollera QGIS/GDAL i .env. Optimering stoppad.`);
+                stop();
+                return;
+            }
+            stats.failed++;
+            tile.error = err.message;
+            writeToLog(`[${collectionId}] Kunde inte optimera ${tile.filename}: ${err.message}`);
+        }
+        if (processed() % 25 === 0) {
+            saveManifest(folder, manifest);
+            writeToLog(`[${collectionId}] Optimering: ${processed()} klara, ${queue.length} i kö (${stats.failed} fel).`);
+        }
+    }
+
+    function pump() {
+        while (!stopped && active < concurrency && queue.length > 0) {
+            const tile = queue.shift();
+            active++;
+            processTile(tile).finally(() => {
+                active--;
+                pump();
+                notifyIfIdle();
+            });
+        }
+    }
+
+    function stop() {
+        stopped = true;
+        queue.length = 0;
+        notifyIfIdle();
+    }
+
+    return {
+        add(tile) {
+            if (stopped || tile.optimized || queued.has(tile.filename)) return;
+            queued.add(tile.filename);
+            queue.push(tile);
+            pump();
+        },
+        stop,
+        drain() {
+            if (active === 0 && queue.length === 0) return Promise.resolve();
+            return new Promise(resolve => idleWaiters.push(resolve));
+        },
+        pendingCount() {
+            return Object.values(manifest.tiles).filter(t => !t.optimized).length;
+        },
+        progress() {
+            return { processed: processed(), waiting: queue.length + active, failed: stats.failed };
+        },
+        summary() {
+            const mb = b => (b / 1048576).toFixed(1);
+            const sizeInfo = stats.converted > 0 ? ` Konverterade: ${mb(stats.bytesBefore)} MB -> ${mb(stats.bytesAfter)} MB.` : '';
+            return `${stats.alreadyCog} redan optimerade från LMV (COG), ${stats.converted} konverterade till COG, ${stats.failed} fel.${sizeInfo}`;
+        }
+    };
+}
+
+async function buildVrtWithStyle(folder, files, vrtName, logTag) {
+    if (files.length === 0) return;
+    const baseName = path.basename(vrtName, '.vrt');
+    const listName = `${baseName}_filelist.txt`;
+    fs.writeFileSync(path.join(folder, listName), files.join('\n'));
+    // Stale VRT/stats would otherwise survive a rebuild.
+    for (const f of [vrtName, `${vrtName}.aux.xml`]) {
+        fs.rmSync(path.join(folder, f), { force: true });
+    }
+    await runGdalBuildVrt(folder, listName, vrtName);
+    writeToLog(`[${logTag}] VRT skapad: ${path.join(folder, vrtName)} (${files.length} raster).`);
+
+    try {
+        const stats = await runGdalInfo(path.join(folder, vrtName));
+        fs.writeFileSync(path.join(folder, `${baseName}.qml`), buildDynamicQml(stats.min, stats.max, 5), 'utf8');
+        writeToLog(`[${logTag}] Stil skapad: ${baseName}.qml (laddas automatiskt i QGIS).`);
+    } catch (styleErr) {
+        writeToLog(`[${logTag}] Kunde inte generera stil: ${styleErr.message}`);
+    }
 }
 
 function buildDynamicQml(minVal, maxVal, step = 5) {
@@ -591,27 +751,21 @@ app.get('/lmv/lan', (req, res) => {
 
 // --- LÓGICA DE DESCARGA ---
 
-async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, abortSignal = null) {
+async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, abortSignal = null, job = null) {
     const STAC_BASE = getStacBase(apiType);
     const slugFromLabel = geometryLabel ? slugify(geometryLabel) : '';
     const areaSlug = slugFromLabel || (geometryLabel ? 'omrade' : '');
     const folderSuffix = areaSlug ? `_${areaSlug}` : '';
-    const downloadFolderName = `LMV_DOWNLOADS_${collectionId}${folderSuffix}`;
-    const vrtBaseName = areaSlug ? `index_${areaSlug}` : 'index';
-    const vrtFileName = `${vrtBaseName}.vrt`;
-    const folderAlreadyExists = fs.existsSync(downloadFolderName);
-    if (folderAlreadyExists) {
-        try {
-            const existingTifs = fs.readdirSync(downloadFolderName)
-                .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'));
-            if (existingTifs.length > 0) {
-                writeToLog(`[${collectionId}] Mappen finns redan (${downloadFolderName}) med ${existingTifs.length} raster. Hoppar över ny nedladdning.`);
-                return;
-            }
-        } catch (err) {
-            console.warn(`[${collectionId}] Kunde inte inspektera befintlig mapp: ${err.message}`);
-        }
+    const isRasterStore = apiType === 'hojd';
+    // Höjd tiles are shared per collection so overlapping/adjacent areas never download a tile twice.
+    const downloadFolderName = isRasterStore
+        ? `LMV_DOWNLOADS_${collectionId}`
+        : `LMV_DOWNLOADS_${collectionId}${folderSuffix}`;
+    const manifest = isRasterStore ? loadManifest(downloadFolderName, collectionId) : null;
+    if (manifest && Object.keys(manifest.tiles).length > 0) {
+        writeToLog(`[${collectionId}] ${Object.keys(manifest.tiles).length} raster finns redan i ${downloadFolderName} och laddas inte ner igen.`);
     }
+    const areaTiles = [];
     const maxRetries = 5;
     
     // CAMBIO 1: Ahora guardamos objetos completos, no solo URLs
@@ -634,21 +788,44 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
 
     let nextUrl = `${STAC_BASE}/search`;
     writeToLog(`[${collectionId}] (${apiType}) Startar sökning/paginering...`);
+    if (job) Object.assign(job.progress, { phase: 'search', collection: collectionId, found: 0, done: 0, total: 0, downloaded: 0, existing: 0 });
+
+        let nextLinkInfo = null;
 
     // 1. PAGINACIÓN
     while (nextUrl) {
         if (abortSignal && abortSignal.aborted) {
             writeToLog(`[${collectionId}] Nedladdning avbröts av användaren.`);
-            return;
+            return areaTiles;
         }
         try {
             const headers = { 'Content-Type': 'application/json' };
             if (apiKey) headers['X-API-Key'] = apiKey;
             if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
-            const config = { headers };
+            const config = { headers, signal: abortSignal || undefined };
             let response;
             
-            if (nextUrl === `${STAC_BASE}/search`) {
+            if (nextLinkInfo) {
+                if (nextLinkInfo.method === 'POST') {
+                    const mergedBody = { ...searchRequestBody, ...(nextLinkInfo.body || {}) };
+                    response = await axios.post(nextUrl, mergedBody, config);
+                } else {
+                    // Try to do a POST if the URL is a search endpoint, because LMV STAC 
+                    // sometimes drops geometry if we use GET for pagination.
+                    if (nextUrl.includes('/search')) {
+                        // Extract query params from nextUrl and put them in POST body to not lose geometry
+                        const urlObj = new URL(nextUrl);
+                        const paramsBody = { ...searchRequestBody };
+                        urlObj.searchParams.forEach((val, key) => {
+                            paramsBody[key] = val;
+                        });
+                        // Use base url without query for POST
+                        response = await axios.post(`${urlObj.origin}${urlObj.pathname}`, paramsBody, config);
+                    } else {
+                        response = await axios.get(nextUrl, config);
+                    }
+                }
+            } else if (!nextLinkInfo && nextUrl === `${STAC_BASE}/search`) {
                 response = await axios.post(nextUrl, searchRequestBody, config);
             } else {
                 response = await axios.get(nextUrl, config);
@@ -701,14 +878,32 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
             });
 
             const nextLink = response.data.links ? response.data.links.find(link => link.rel === 'next') : null;
-            nextUrl = nextLink ? nextLink.href : null;
+            if (job) job.progress.found = downloadQueue.length;
+            if (nextLink) {
+                nextUrl = nextLink.href;
+                nextLinkInfo = nextLink;
+            } else {
+                nextUrl = null;
+                nextLinkInfo = null;
+            }
             
             await delay(500); 
 
         } catch (error) {
-            if (error.response && error.response.status === 429) {
+            if (abortSignal && abortSignal.aborted) {
+                writeToLog(`[${collectionId}] Sökning avbruten av användaren.`);
+                return areaTiles;
+            }
+            const searchStatus = error.response && error.response.status;
+            if (searchStatus === 401 || searchStatus === 403) {
+                writeToLog(`[${collectionId}] Autentisering nekad (${searchStatus}) vid sökning. Token har troligen gått ut.`);
+                const authErr = new Error(`LMV auth failed (${searchStatus})`);
+                authErr.code = 'LMV_AUTH';
+                throw authErr;
+            }
+            if (searchStatus === 429) {
                 writeToLog(`[${collectionId}] Rate limit (429) vid paginering. Väntar 10s...`);
-                await delay(10000);
+                await abortableDelay(10000, abortSignal);
                 continue; 
             }
             writeToLog(`[${collectionId}] Fel vid paginering: ${error.message}. Avbryter sökning.`);
@@ -720,33 +915,51 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
     downloadQueue = downloadQueue.filter((v,i,a)=>a.findIndex(t=>(t.url===v.url))===i);
 
     if (downloadQueue.length > 0) {
-        writeToLog(`[${collectionId}] KLART! Hittade ${downloadQueue.length} filer att ladda ner.`);
+        const alreadyHave = downloadQueue.filter(q => fs.existsSync(path.join(downloadFolderName, path.basename(new URL(q.url).pathname)))).length;
+        writeToLog(`[${collectionId}] Hittade ${downloadQueue.length} filer i området: ${alreadyHave} finns redan, ${downloadQueue.length - alreadyHave} laddas ner.`);
+        if (job) {
+            Object.assign(job.progress, { phase: 'download', total: downloadQueue.length, existing: alreadyHave });
+            job.totalFound += downloadQueue.length;
+        }
     } else {
         writeToLog(`[${collectionId}] Inga resultat för given geometri. Fortsätter med nästa samling.`);
-        return;
+        return areaTiles;
     }
 
-    if (!folderAlreadyExists) fs.mkdirSync(downloadFolderName, { recursive: true });
+    fs.mkdirSync(downloadFolderName, { recursive: true });
+    if (job) job.folders.add(path.basename(downloadFolderName));
+
+    const processor = manifest ? createTileProcessor(downloadFolderName, collectionId, manifest, abortSignal) : null;
+    if (job) job.processor = processor;
+    if (processor) {
+        const leftover = processor.pendingCount();
+        if (leftover > 0) writeToLog(`[${collectionId}] ${leftover} befintliga raster är inte optimerade än; bearbetas parallellt med nedladdningen.`);
+        Object.values(manifest.tiles).forEach(t => processor.add(t));
+    }
 
     // Array para guardar las features del GeoJSON final
     let tileIndexFeatures = [];
 
     // 2. DESCARGA
+    try {
     for (let i = 0; i < downloadQueue.length; i++) {
         if (abortSignal && abortSignal.aborted) {
             writeToLog(`[${collectionId}] Descarga cancelada por el usuario.`);
-            return;
+            return areaTiles;
         }
         const itemData = downloadQueue[i];
         const url = itemData.url;
         const filename = path.basename(new URL(url).pathname);
         const filePath = path.join(downloadFolderName, filename);
-        
-        await delay(1000); 
+        // Written first so an interrupted download is never mistaken for a finished file.
+        const partPath = `${filePath}.part`;
+        if (job) job.progress.done = i;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 if (!fs.existsSync(filePath)) {
+                    await abortableDelay(1000, abortSignal);
+                    if (abortSignal && abortSignal.aborted) throw new Error('aborted');
                     const httpAgent = new http.Agent({ keepAlive: false });
                     const downloadHeaders = {};
                     if (apiKey) downloadHeaders['X-API-Key'] = apiKey;
@@ -755,17 +968,45 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                     const response = await axios({
                         method: 'GET', url, responseType: 'stream', httpAgent, timeout: 60000,
                         headers: downloadHeaders,
-                        auth: downloadAuth
+                        auth: downloadAuth,
+                        signal: abortSignal || undefined
                     });
-                    const writer = fs.createWriteStream(filePath);
+                    const writer = fs.createWriteStream(partPath);
                     response.data.pipe(writer);
                     await new Promise((resolve, reject) => {
-                        writer.on('finish', resolve);
-                        writer.on('error', reject);
+                        // axios only cancels the request phase; the body stream must be torn down explicitly.
+                        const onAbort = () => {
+                            response.data.destroy();
+                            writer.destroy();
+                            reject(new Error('aborted'));
+                        };
+                        const cleanup = () => { if (abortSignal) abortSignal.removeEventListener('abort', onAbort); };
+                        writer.on('finish', () => { cleanup(); resolve(); });
+                        writer.on('error', err => { cleanup(); reject(err); });
+                        response.data.on('error', err => { cleanup(); reject(err); });
+                        if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
                     });
+                    fs.renameSync(partPath, filePath);
+                    if (job) job.progress.downloaded++;
                     console.log(`[${i+1}/${downloadQueue.length}] Nedladdad: ${filename}`);
                 } else {
                     console.log(`[${i+1}/${downloadQueue.length}] Finns redan: ${filename}`);
+                }
+
+                if (manifest && /\.tiff?$/i.test(filename)) {
+                    const tile = manifest.tiles[filename] || (manifest.tiles[filename] = { optimized: false });
+                    Object.assign(tile, {
+                        filename,
+                        id: itemData.id,
+                        url,
+                        bbox: itemData.bbox,
+                        downloaded: true,
+                        downloadedAt: tile.downloadedAt || new Date().toISOString(),
+                        command: cogCommandString(filename)
+                    });
+                    areaTiles.push(filePath);
+                    processor.add(tile);
+                    if (areaTiles.length % 25 === 0) saveManifest(downloadFolderName, manifest);
                 }
 
                 // Si es ZIP, descomprimimos
@@ -803,16 +1044,59 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
 
                 break; 
             } catch (error) {
-                if (error.response && error.response.status === 429) {
+                if (abortSignal && abortSignal.aborted) {
+                    try { fs.rmSync(partPath, { force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) {}
+                    writeToLog(`[${collectionId}] Nedladdning avbruten av användaren vid ${filename} (${i}/${downloadQueue.length} klara).`);
+                    return areaTiles;
+                }
+                const status = error.response && error.response.status;
+                if (status === 401 || status === 403) {
+                    writeToLog(`[${collectionId}] Autentisering nekad (${status}) vid ${filename}. Token har troligen gått ut. Avbryter; ${i}/${downloadQueue.length} filer klara. Starta om med nytt token för att fortsätta (befintliga filer hoppas över).`);
+                    const authErr = new Error(`LMV auth failed (${status})`);
+                    authErr.code = 'LMV_AUTH';
+                    throw authErr;
+                }
+                if (status === 429) {
                     const waitTime = 30000;
                     console.warn(`[${collectionId}] 429 Rate Limit. Esperando ${waitTime/1000}s...`);
-                    await delay(waitTime);
+                    await abortableDelay(waitTime, abortSignal);
                 } else {
                     console.warn(`[${collectionId}] Fel vid nedladdning ${filename}: ${error.message}. Försök ${attempt}/${maxRetries}`);
-                    await delay(2000 * attempt);
+                    if (attempt === maxRetries) {
+                        writeToLog(`[${collectionId}] Gav upp ${filename} efter ${maxRetries} försök: ${error.message}`);
+                        if (job) job.progress.failed = (job.progress.failed || 0) + 1;
+                    }
+                    await abortableDelay(2000 * attempt, abortSignal);
                 }
             }
         }
+    }
+    if (job) job.progress.done = downloadQueue.length;
+    } finally {
+        // Downloaded tiles are local, so they are still processed after an auth error; only a user abort skips the queue.
+        if (processor) {
+            if (abortSignal && abortSignal.aborted) processor.stop();
+            if (job) job.progress.phase = 'optimize';
+            writeToLog(`[${collectionId}] Nedladdningsfasen avslutad. Väntar på pågående optimering...`);
+            await processor.drain();
+            const remaining = processor.pendingCount();
+            writeToLog(`[${collectionId}] Optimering: ${processor.summary()}${remaining ? ` ${remaining} raster återstår till nästa körning.` : ''}`);
+        }
+        if (manifest) saveManifest(downloadFolderName, manifest);
+    }
+
+    // Raster tile index covers every tile in the shared folder, not only this area.
+    if (manifest) {
+        tileIndexFeatures = Object.values(manifest.tiles)
+            .filter(t => Array.isArray(t.bbox) && t.bbox.length === 4)
+            .map(t => {
+                const [minx, miny, maxx, maxy] = t.bbox;
+                return {
+                    type: 'Feature',
+                    properties: { id: t.id, filename: t.filename, location: `./${t.filename}` },
+                    geometry: { type: 'Polygon', coordinates: [[[minx, miny], [maxx, miny], [maxx, maxy], [minx, maxy], [minx, miny]]] }
+                };
+            });
     }
 
     // CAMBIO 4: Generar archivo tile_index.geojson
@@ -833,63 +1117,102 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         }
     }
 
-    // POST-PROCESAMIENTO: Merge + Overviews + VRT + Estilo
-    try {
-        const tifFiles = fs.readdirSync(downloadFolderName)
-            .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'))
-            .sort();
-
-        if (tifFiles.length > 0) {
-            writeToLog(`[${collectionId}] Startar efterbearbetning: sammanslagning av ${tifFiles.length} tiles...`);
-            
-            const mergedFileName = `merged_${vrtBaseName}.tif`;
-            const mergedPath = path.join(downloadFolderName, mergedFileName);
-            
-            try {
-                // 1. Merge todos los tiles en un solo GeoTIFF
-                await runGdalMerge(downloadFolderName, tifFiles, mergedFileName);
-                writeToLog(`[${collectionId}] Sammanfogning klar: ${mergedFileName}`);
-                
-                // 2. Remover tiles originales
-                writeToLog(`[${collectionId}] Tar bort ${tifFiles.length} ursprungliga tiles...`);
-                tifFiles.forEach(file => {
-                    try {
-                        fs.unlinkSync(path.join(downloadFolderName, file));
-                    } catch (e) {
-                        console.warn(`Kunde inte ta bort ${file}: ${e.message}`);
-                    }
-                });
-                
-                // 3. Construir overviews (pirámides)
-                writeToLog(`[${collectionId}] Skapar översiktsnivåer (gdaladdo -r average)...`);
-                await runGdalAddo(downloadFolderName, mergedFileName);
-                writeToLog(`[${collectionId}] Översikter färdiga.`);
-                
-                // 4. Generar VRT apuntando al merged
-                const listPath = path.join(downloadFolderName, 'filelist.txt');
-                fs.writeFileSync(listPath, mergedFileName);
-                await runGdalBuildVrt(downloadFolderName, 'filelist.txt', vrtFileName);
-                writeToLog(`[${collectionId}] VRT genererat: ${vrtFileName}`);
-                
-                // 5. Generar estilo dinámico
-                try {
-                    const stats = await runGdalInfo(mergedPath);
-                    const qmlContent = buildDynamicQml(stats.min, stats.max, 5);
-                    const qmlPath = path.join(downloadFolderName, `${vrtFileName}.qml`);
-                    fs.writeFileSync(qmlPath, qmlContent, 'utf8');
-                    writeToLog(`[${collectionId}] Dynamisk stil applicerad (intervall om 5 enheter).`);
-                } catch (styleErr) {
-                    console.warn(`[${collectionId}] Kunde inte generera stil: ${styleErr.message}`);
-                }
-            } catch (postErr) {
-                console.warn(`[${collectionId}] Fel i efterbearbetning: ${postErr.message}`);
-            }
+    // POST-PROCESAMIENTO (höjd): tiles ya optimerade arriba; VRT över alla tiles i samlingen + stil
+    if (manifest && !(abortSignal && abortSignal.aborted)) {
+        if (job) job.progress.phase = 'vrt';
+        try {
+            await buildVrtWithStyle(downloadFolderName, Object.keys(manifest.tiles).sort(), 'index.vrt', collectionId);
+        } catch (postErr) {
+            writeToLog(`[${collectionId}] Fel vid skapande av VRT: ${postErr.message}`);
         }
-    } catch (vrtErr) {
-        console.error(`Det gick inte att förbereda efterbearbetning för ${collectionId}: ${vrtErr.message}`);
     }
 
     writeToLog(`[${collectionId}] Processen slutförd.`);
+    return areaTiles;
+}
+
+// --- JOBB-REGISTER (live status för Nedladdningar-sidan) ---
+function createJob({ type, collectionId, geometry, geometryLabel }) {
+    const id = `${type}_${collectionId}_${slugify(geometryLabel || '') || 'default'}_${Date.now()}`;
+    const job = {
+        id,
+        type,
+        collectionId,
+        label: geometryLabel || (geometry ? 'valt område' : 'hela Sverige'),
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        message: null,
+        resultPath: null,
+        totalFound: 0,
+        error: null,
+        folders: new Set(),
+        progress: { phase: 'start', failed: 0 },
+        processor: null,
+        controller: new AbortController()
+    };
+    jobs.set(id, job);
+    return job;
+}
+
+function jobTypeName(job) {
+    return job.type === 'hojd' ? 'Höjddata (Markhöjdmodell)' : `Vektordata (${job.collectionId})`;
+}
+
+function finishJob(job) {
+    const what = `${jobTypeName(job)} för ${job.label}`;
+    job.finishedAt = new Date().toISOString();
+    job.processor = null;
+    if (job.controller.signal.aborted) {
+        job.status = 'cancelled';
+        job.message = `Nedladdningen av ${what} stoppades. Redan nedladdade filer finns kvar och återanvänds nästa gång.`;
+    } else if (job.error && job.error.code === 'LMV_AUTH') {
+        job.status = 'failed';
+        job.message = `Nedladdningen av ${what} avbröts: Lantmäteriet nekade inloggningen (token har troligen gått ut). Starta igen med nytt token – redan nedladdade filer hoppas över.`;
+    } else if (job.error) {
+        job.status = 'failed';
+        job.message = `Nedladdningen av ${what} misslyckades: ${job.error.message}`;
+    } else if (job.totalFound === 0) {
+        job.status = 'done';
+        job.message = `Inga data hittades för ${what}.`;
+    } else {
+        job.status = 'done';
+        const where = job.resultPath
+            ? ` Öppna ${job.resultPath} i QGIS.`
+            : ` Filerna finns i ${[...job.folders].join(', ')}.`;
+        const failed = job.progress.failed ? ` Obs: ${job.progress.failed} filer kunde inte laddas ner – starta igen för att komplettera.` : '';
+        job.message = `${what} har laddats ner och är klar att användas.${where}${failed}`;
+    }
+    job.progress.phase = 'finished';
+    writeToLog(`[JOBB ${job.id}] ${job.status.toUpperCase()}: ${job.message}`);
+}
+
+function serializeJob(job) {
+    const opt = job.processor ? job.processor.progress() : null;
+    return {
+        id: job.id,
+        type: job.type,
+        collectionId: job.collectionId,
+        label: job.label,
+        status: job.status,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        message: job.message,
+        resultPath: job.resultPath,
+        folders: [...job.folders],
+        progress: {
+            ...job.progress,
+            optimized: opt ? opt.processed : 0,
+            optimizeWaiting: opt ? opt.waiting : 0
+        }
+    };
+}
+
+function jobUsingFolder(folderName) {
+    for (const job of jobs.values()) {
+        if ((job.status === 'running' || job.status === 'stopping') && job.folders.has(folderName)) return job;
+    }
+    return null;
 }
 
 // --- RUTA DE INICIO DE DESCARGA ---
@@ -916,9 +1239,9 @@ app.post('/lmv/start-full-download', async (req, res) => {
     }
 
     // Crear identificador y controlador solo después de validar
-    const downloadId = `${type}_${collectionId}_${geometryLabel || 'default'}_${Date.now()}`;
-    const abortController = new AbortController();
-    activeDownloads.set(downloadId, abortController);
+    const job = createJob({ type, collectionId, geometry, geometryLabel });
+    const downloadId = job.id;
+    const abortController = job.controller;
 
     // LÓGICA ESPECIAL: Descargar TODAS las Markhöjdmodell
         // ...existing code...
@@ -934,7 +1257,8 @@ app.post('/lmv/start-full-download', async (req, res) => {
                     if (apiKey) listHeaders['X-API-Key'] = apiKey;
                     if (apiToken) listHeaders['Authorization'] = `Bearer ${apiToken}`;
                     const listRes = await axios.get('https://api.lantmateriet.se/stac-hojd/v1/collections', {
-                        headers: listHeaders
+                        headers: listHeaders,
+                        signal: abortController.signal
                     });
                     const markhojdCols = listRes.data.collections.filter(col => 
                         col.id.toLowerCase().includes('markhojd') || col.title.toLowerCase().includes('markhöjd')
@@ -944,27 +1268,50 @@ app.post('/lmv/start-full-download', async (req, res) => {
 
                     // NUEVO: procesar estrictamente en serie + logs detallados
                     let processed = 0;
+                    const allAreaTiles = [];
                     for (const col of markhojdCols) {
                         if (abortController.signal.aborted) {
                             writeToLog(`[ALL_MARKHOJD] Processen avbröts av användaren.`);
                             break;
                         }
                         processed++;
+                        Object.assign(job.progress, { collectionIndex: processed, collectionCount: markhojdCols.length });
                         writeToLog(`[ALL_MARKHOJD] (${processed}/${markhojdCols.length}) -> ${col.id} — startar hämtning.`);
                         try {
-                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, abortController.signal);
+                            const tiles = await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, abortController.signal, job);
+                            if (tiles) allAreaTiles.push(...tiles);
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) slutförd.`);
                         } catch (err) {
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) misslyckades: ${err.message}`);
+                            if (err.code === 'LMV_AUTH') {
+                                job.error = err;
+                                writeToLog(`[ALL_MARKHOJD] Avbryter alla samlingar p.g.a. ogiltiga/utgångna uppgifter.`);
+                                break;
+                            }
                         }
-                        await delay(2000); // pausa entre colecciones
+                        await abortableDelay(2000, abortController.signal); // pausa entre colecciones
+                    }
+
+                    if (allAreaTiles.length > 0 && !abortController.signal.aborted) {
+                        job.progress.phase = 'vrt';
+                        fs.mkdirSync(COMBINED_HOJD_FOLDER, { recursive: true });
+                        job.folders.add(COMBINED_HOJD_FOLDER);
+                        const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+                        const areaName = geometryLabel ? slugify(geometryLabel) : (geometry ? `omrade-${stamp}` : 'hela-sverige');
+                        const relPaths = allAreaTiles.map(p => path.relative(COMBINED_HOJD_FOLDER, p).split(path.sep).join('/'));
+                        await buildVrtWithStyle(COMBINED_HOJD_FOLDER, relPaths, `${areaName}.vrt`, 'ALL_MARKHOJD');
+                        job.resultPath = path.join(COMBINED_HOJD_FOLDER, `${areaName}.vrt`);
+                        writeToLog(`[ALL_MARKHOJD] Öppna ${job.resultPath} i QGIS för hela området.`);
                     }
 
                     writeToLog(`[ALL_MARKHOJD] SKANNING SLUTFÖRD! Kontrollera nedladdningsmappen.`);
                 } catch (err) {
-                    writeToLog(`[ALL_MARKHOJD] Kritiskt fel: ${err.message}`);
+                    if (!abortController.signal.aborted) {
+                        job.error = err;
+                        writeToLog(`[ALL_MARKHOJD] Kritiskt fel: ${err.message}`);
+                    }
                 } finally {
-                    activeDownloads.delete(downloadId);
+                    finishJob(job);
                 }
             })();
             return;
@@ -972,21 +1319,44 @@ app.post('/lmv/start-full-download', async (req, res) => {
 
     // Normal logik (en enda samling)
     res.status(202).json({ success: true, message: `Process startad för '${collectionId}'.`, downloadId });
-    fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, abortController.signal)
-        .catch(err => console.error(`[${collectionId}] Error tarea fondo:`, err))
-        .finally(() => activeDownloads.delete(downloadId));
+    fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, abortController.signal, job)
+        .then(() => {
+            const folder = [...job.folders][0];
+            if (type === 'hojd' && folder && fs.existsSync(path.join(folder, 'index.vrt'))) {
+                job.resultPath = path.join(folder, 'index.vrt');
+            }
+        })
+        .catch(err => {
+            console.error(`[${collectionId}] Error tarea fondo:`, err);
+            if (!abortController.signal.aborted) job.error = err;
+        })
+        .finally(() => finishJob(job));
 });
+
+app.get('/lmv/jobs', (req, res) => {
+    const now = Date.now();
+    for (const [id, job] of jobs) {
+        if (job.finishedAt && now - Date.parse(job.finishedAt) > FINISHED_JOB_TTL_MS) jobs.delete(id);
+    }
+    const list = [...jobs.values()]
+        .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        .map(serializeJob);
+    res.json({ success: true, jobs: list });
+});
+
 app.post('/lmv/cancel-download', (req, res) => {
     const { downloadId } = req.body;
     if (!downloadId) {
         return res.status(400).json({ success: false, error: 'downloadId krävs' });
     }
-    const controller = activeDownloads.get(downloadId);
-    if (controller) {
-        controller.abort();
-        activeDownloads.delete(downloadId);
-        writeToLog(`[CANCEL] Nedladdning avbröts: ${downloadId}`);
-        res.json({ success: true, message: 'Nedladdning avbröts.' });
+    const job = jobs.get(downloadId);
+    if (job && job.status === 'running') {
+        job.status = 'stopping';
+        job.controller.abort();
+        writeToLog(`[CANCEL] Stoppar jobb: ${downloadId} (nedladdning och pågående optimering)`);
+        res.json({ success: true, message: 'Nedladdningen stoppas...' });
+    } else if (job && job.status === 'stopping') {
+        res.json({ success: true, message: 'Jobbet håller redan på att stoppas.' });
     } else {
         res.json({ success: false, error: 'Nedladdning hittades inte eller är redan slutförd.' });
     }
@@ -1049,6 +1419,9 @@ app.get('/lmv/downloads/download/:folderName', (req, res) => {
     if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
         return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
     }
+    if (jobUsingFolder(folderName)) {
+        return res.status(409).json({ success: false, error: 'Mappen används av en pågående nedladdning. Vänta tills den är klar eller stoppa jobbet.' });
+    }
     
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${folderName}.zip"`);
@@ -1074,6 +1447,9 @@ app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
     const folderPath = path.join(__dirname, folderName);
     if (!fs.existsSync(folderPath)) {
         return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
+    }
+    if (jobUsingFolder(folderName)) {
+        return res.status(409).json({ success: false, error: 'Mappen används av en pågående nedladdning. Stoppa jobbet först.' });
     }
     
     try {
