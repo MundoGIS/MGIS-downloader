@@ -8,25 +8,12 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" crossorigin="" />
-  <link rel="stylesheet" href="./css/style.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  <link rel="stylesheet" href="css/style.css">
 </head>
 
 <body>
-      <header class="main-header">
-          <div class="brand-wrap">
-              <img src="images/MGIS-logo_azul.png" alt="logo" class="site-logo">
-              <div class="brand">LMV Data Downloader</div>
-          </div>
-          <nav>
-            <a href="index.html">Hem</a>
-            <a href="artdata.html" class="active">ArtData</a>
-              <a href="lmv.html">Vektordata</a>
-              <a href="lmv_hojd.html">Höjddata</a>
-              <a href="downloads.html">📦 Nedladdningar</a>
-              <a href="hjalp.html" target="_blank" style="color:#3273dc;font-weight:bold;">Hjälp</a>
-          </nav>
-      </header> 
+      <div id="site-header"></div>
   <div class="container">
     <h1>Ladda ner GBIF-data</h1>
     <form id="species-form">
@@ -165,6 +152,7 @@
 
   <script src="script.js"></script>
   <div id="global-notification" class="notification" style="display:none; position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9999; width:min(900px,90%); text-align:center;"></div>
+  <script src="auth-nav.js" defer></script>
 </body>
 
 </html>

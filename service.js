@@ -6,7 +6,12 @@
  */
 
 
- const Service = require('node-windows').Service;
+ if (process.platform !== 'win32') {
+  console.error('service.js instala un servicio de Windows. En Linux/macOS usa scripts/install-linux-service.sh (systemd) o un gestor de procesos como pm2.');
+  process.exit(1);
+}
+
+const Service = require('node-windows').Service;
 
  // Crea un nuevo objeto de servicio
  const svc = new Service({

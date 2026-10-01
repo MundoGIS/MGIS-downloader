@@ -5,56 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nedladdningshanterare - LMV</title>
     <link rel="stylesheet" href="css/style.css">
-    <style>
-        .jobs-section { margin-bottom: 30px; }
-        .jobs-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        .jobs-section-header h2 { font-size: 1.2em; color: #333; margin: 0; }
-        .job-card { border: 1px solid #dee2e6; border-left: 5px solid #667eea; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; background: #fff; }
-        .job-card.status-stopping { border-left-color: #fd7e14; }
-        .job-card.status-done { border-left-color: #28a745; }
-        .job-card.status-cancelled { border-left-color: #6c757d; }
-        .job-card.status-failed { border-left-color: #dc3545; }
-        .job-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .job-title { font-weight: 600; color: #333; }
-        .job-sub { font-size: 0.85em; color: #6c757d; margin-top: 2px; }
-        .job-status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85em; font-weight: 600; padding: 3px 10px; border-radius: 12px; }
-        .job-status.running { background: #e8eaff; color: #3f4bb8; }
-        .job-status.stopping { background: #fff3e0; color: #b35900; }
-        .job-status.done { background: #d4edda; color: #155724; }
-        .job-status.cancelled { background: #e9ecef; color: #495057; }
-        .job-status.failed { background: #f8d7da; color: #721c24; }
-        .mini-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(0,0,0,0.15); border-top-color: currentColor; border-radius: 50%; animation: spin 0.9s linear infinite; }
-        .job-progress { margin-top: 10px; }
-        .job-bar { height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; }
-        .job-bar-fill { height: 100%; background: #667eea; transition: width 0.4s; }
-        .job-bar-fill.indeterminate { width: 30% !important; animation: slide 1.2s ease-in-out infinite; }
-        @keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
-        .job-detail { font-size: 0.85em; color: #555; margin-top: 6px; }
-        .job-message { margin-top: 8px; font-size: 0.95em; }
-        .badge-running { background: #e8eaff; color: #3f4bb8; display: inline-flex; align-items: center; gap: 5px; }
-        .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
-        #toast { position: fixed; right: 20px; bottom: 20px; max-width: 460px; z-index: 9999; display: none; padding: 14px 18px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.2); color: #fff; font-size: 0.95em; }
-        #toast.done { background: #28a745; }
-        #toast.cancelled { background: #6c757d; }
-        #toast.failed { background: #dc3545; }
-        #toast .toast-close { float: right; margin-left: 12px; cursor: pointer; font-weight: bold; }
-    </style>
 </head>
 <body class="downloads-page">
-    <header class="main-header">
-        <div class="brand-wrap">
-            <img src="images/MGIS-logo_azul.png" alt="logo" class="site-logo">
-            <div class="brand">LMV Data Downloader</div>
-        </div>
-        <nav>
-            <a href="index.html">Hem</a>
-            <a href="artdata.html">ArtData</a>
-            <a href="lmv.html">Vektordata</a>
-            <a href="lmv_hojd.html">Höjddata</a>
-            <a href="downloads.html" class="active">📦 Nedladdningar</a>
-            <a href="hjalp.html" target="_blank" style="color:#3273dc;font-weight:bold;">Hjälp</a>
-        </nav>
-    </header>
+        <div id="site-header"></div>
     <div class="container">
         <div class="header">
             <h1>📦 Nedladdningshanterare</h1>
@@ -106,9 +59,18 @@
 
     <div id="toast" role="status" aria-live="polite"></div>
 
+    <script src="auth-nav.js" defer></script>
     <script>
         let downloads = [];
         let jobs = [];
+        let catalogs = [];
+        let canDeleteDownloads = false;
+        const serviceKeys = new Map();
+        let cleanupSupported = false;
+        const publicationMessages = new Map();
+        const chosenResolutions = new Map();
+        const chosenStyles = new Map();
+        const publishingFolders = new Set();
         const knownJobStatus = new Map();
         let firstJobsPoll = true;
         let lastFolderRefresh = 0;
@@ -118,6 +80,14 @@
             return String(value == null ? '' : value)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function catalogTileUrl(catalog) {
+            return catalog.tileUrl || `${location.origin}/terrain/${encodeURIComponent(catalog.alias)}/tiles/{z}/{x}/{y}.png`;
+        }
+
+        function serviceTileUrl(catalog, key = serviceKeys.get(catalog.alias)) {
+            return catalog.isPublic === false ? `${catalogTileUrl(catalog)}?api_key=${key || '<API-KEY>'}` : catalogTileUrl(catalog);
         }
 
         function getDismissed() {
@@ -153,11 +123,18 @@
         
         async function loadDownloads() {
             try {
-                const response = await fetch('/lmv/downloads/list');
+                const [response, catalogsResponse, accountResponse] = await Promise.all([
+                    fetch('/lmv/downloads/list'), fetch('/terrain/catalogs'), fetch('/auth/me')
+                ]);
                 const data = await response.json();
+                const catalogData = await catalogsResponse.json();
+                canDeleteDownloads = accountResponse.ok && (await accountResponse.json()).user?.role === 'admin';
+                if (!catalogData.success) throw new Error(catalogData.error || 'Kunde inte läsa kataloger');
                 
                 if (data.success) {
                     downloads = data.downloads;
+                    catalogs = catalogData.catalogs;
+                    cleanupSupported = catalogData.supportsCleanup === true;
                     renderDownloads();
                 } else {
                     throw new Error(data.error);
@@ -193,6 +170,11 @@
             grid.innerHTML = downloads.map(download => {
                 const activeJob = activeJobForFolder(download.name);
                 const lock = activeJob ? 'disabled title="Mappen används av en pågående nedladdning"' : '';
+                const published = catalogs.filter(catalog => catalog.folderName === download.name);
+                const message = publicationMessages.get(download.name);
+                const publishing = publishingFolders.has(download.name);
+                const selectedResolution = chosenResolutions.get(download.name) || String(published[0]?.resolutionMeters || 'original');
+                const style = chosenStyles.get(download.name) || published[0]?.hillshadeStyle || { altitude: 35, strength: 1.7 };
                 return `
                 <div class="download-card">
                     <div class="download-header">
@@ -225,19 +207,52 @@
                             <span class="info-value">${formatDate(download.modified)}</span>
                         </div>
                     </div>
+                    ${published.map(catalog => `
+                    <div class="published-catalog" style="margin:10px 0; min-width:0;">
+                        <strong>${escapeHtml(catalog.title)} (${escapeHtml(catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m')})</strong>
+                        <label style="display:inline-flex;align-items:center;gap:6px;margin:0 10px;">
+                            <input type="checkbox" ${catalog.isPublic === false ? '' : 'checked'} onchange="setCatalogAccess('${escapeHtml(catalog.alias)}', this.checked)">
+                            Public
+                        </label>
+                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0;">
+                            <code style="overflow-wrap:anywhere;min-width:0;flex:1;">${escapeHtml(serviceTileUrl(catalog))}</code>
+                            <button type="button" class="btn btn-secondary btn-sm" title="Kopiera XYZ-länk" onclick="copyCatalogLink('${escapeHtml(catalog.alias)}')">Kopiera länk</button>
+                            ${catalog.isPublic === false ? `<button type="button" class="btn btn-secondary btn-sm" title="Ogiltigförklara tidigare nyckel" onclick="rotateCatalogKey('${escapeHtml(catalog.alias)}')">Ny API-nyckel</button>` : ''}
+                            <button type="button" class="btn btn-danger btn-sm" title="Ta bort publicerade karttiles" onclick="unpublishCatalog('${escapeHtml(catalog.alias)}')" ${cleanupSupported ? '' : 'disabled'}>Avpublicera</button>
+                        </div>
+                    </div>`).join('')}
+                    ${message ? `<p role="status" style="overflow-wrap:anywhere;">${escapeHtml(message)}</p>` : ''}
                     
                     <div class="download-actions">
                         ${activeJob ? `
                         <button class="btn btn-danger btn-sm" onclick="stopJob('${escapeHtml(activeJob.id)}')" ${activeJob.status === 'stopping' ? 'disabled' : ''}>
                             ⏹ Stoppa nedladdning
                         </button>` : ''}
+                        <label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8em;color:#444;">
+                            <span>Upplösning vid publicering</span>
+                            <select id="resolution-${escapeHtml(download.name)}" onchange="chosenResolutions.set('${escapeHtml(download.name)}', this.value)" style="min-width:90px; padding:6px 8px; border-radius:6px; border:1px solid #ced4da;">
+                                ${[['original', 'Original'], ['10', '10 m'], ['20', '20 m'], ['50', '50 m'], ['100', '100 m']].map(([value, label]) => `<option value="${value}" ${selectedResolution === value ? 'selected' : ''}>${label}</option>`).join('')}
+                            </select>
+                        </label>
+                        <label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8em;color:#444;">
+                            <span>Ljusvinkel</span>
+                            <input type="number" min="15" max="80" step="1" value="${escapeHtml(style.altitude)}" title="Lägre vinkel ger mörkare skuggor (15-80°)" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'altitude', this.value)" style="width:65px;padding:6px;">°
+                        </label>
+                        <label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8em;color:#444;">
+                            <span>Reliefstyrka</span>
+                            <input type="number" min="0.5" max="3" step="0.1" value="${escapeHtml(style.strength)}" title="Högre värde ger mer markerad terräng (0,5-3)" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'strength', this.value)" style="width:65px;padding:6px;">
+                        </label>
+                        <button class="btn btn-primary btn-sm ${publishing ? 'publish-pending' : ''}" onclick="publishCatalog('${escapeHtml(download.name)}', document.getElementById('resolution-${escapeHtml(download.name)}').value)" ${!cleanupSupported || activeJob || !download.tifCount || publishing ? 'disabled title="Starta om servern eller vänta på färdiga TIFF-filer"' : ''}>
+                            ${publishing ? 'Publicerar...' : published.length ? 'Publicera om' : 'Publicera karttiles'}
+                        </button>
                         <button class="btn btn-success btn-sm" onclick="downloadFolder('${escapeHtml(download.name)}')" ${lock}>
                             ⬇️ Ladda ner ZIP
                         </button>
-                        <button class="btn btn-danger btn-sm" onclick="deleteFolder('${escapeHtml(download.name)}')" ${lock}>
+                        ${canDeleteDownloads ? `<button class="btn btn-danger btn-sm" onclick="deleteFolder('${escapeHtml(download.name)}')" ${!cleanupSupported || activeJob || publishing ? 'disabled' : ''}>
                             🗑️ Ta bort
-                        </button>
+                        </button>` : ''}
                     </div>
+                    ${!cleanupSupported ? '<p role="status">Starta om servern för att aktivera publicering och säker radering.</p>' : ''}
                 </div>
             `;
             }).join('');
@@ -247,9 +262,149 @@
             const url = `/lmv/downloads/download/${encodeURIComponent(folderName)}`;
             window.location.href = url;
         }
+
+        function setHillshadeStyle(folderName, field, value) {
+            const published = catalogs.find(catalog => catalog.folderName === folderName);
+            const style = chosenStyles.get(folderName) || published?.hillshadeStyle || { altitude: 35, strength: 1.7 };
+            chosenStyles.set(folderName, { ...style, [field]: Number(value) });
+        }
+
+        async function publishCatalog(folderName, resolutionOverride) {
+            if (sessionStorage.getItem('terrainPublishJob')) {
+                alert('En katalog publiceras redan i den här fliken.');
+                return;
+            }
+            const published = catalogs.find(catalog => catalog.folderName === folderName);
+            const alias = prompt('Ange alias för katalogen (får bara innehålla a-z, 0-9, bindestreck och underscore):', published?.alias || folderName.replace(/^LMV_DOWNLOADS_/, '').replace(/[^a-zA-Z0-9_-]+/g, '_').toLowerCase());
+            if (!alias) return;
+
+            const allowed = ['original', '10', '20', '50', '100'];
+            const cleanResolution = allowed.includes(String(resolutionOverride)) ? String(resolutionOverride) : 'original';
+            const hillshadeStyle = chosenStyles.get(folderName) || published?.hillshadeStyle || { altitude: 35, strength: 1.7 };
+            if (!Number.isFinite(hillshadeStyle.altitude) || hillshadeStyle.altitude < 15 || hillshadeStyle.altitude > 80 || !Number.isFinite(hillshadeStyle.strength) || hillshadeStyle.strength < 0.5 || hillshadeStyle.strength > 3) {
+                publicationMessages.set(folderName, 'Ljusvinkel: 15-80°, reliefstyrka: 0,5-3.');
+                renderDownloads();
+                return;
+            }
+
+            try {
+                publishingFolders.add(folderName);
+                publicationMessages.set(folderName, 'Publicerar XYZ-tiles...');
+                renderDownloads();
+                const response = await fetch('/terrain/publish', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        folderName,
+                        alias,
+                        title: alias.replace(/_/g, ' '),
+                        resolutionMeters: cleanResolution === 'original' ? 'original' : Number(cleanResolution),
+                        hillshadeStyle
+                    })
+                });
+                const data = await response.json();
+                if (!data.success) throw new Error(data.error || 'Kunde inte publicera katalogen');
+                sessionStorage.setItem('terrainPublishJob', JSON.stringify({ id: data.jobId, folderName }));
+                await waitForPublication(data.jobId, folderName);
+            } catch (error) {
+                console.error('publishCatalog failed:', error);
+                publicationMessages.set(folderName, error.message);
+                renderDownloads();
+            } finally {
+                publishingFolders.delete(folderName);
+                renderDownloads();
+            }
+        }
+
+        async function waitForPublication(jobId, folderName) {
+            publishingFolders.add(folderName);
+            publicationMessages.set(folderName, 'Publicerar XYZ-tiles...');
+            renderDownloads();
+            try {
+                let data;
+                do {
+                    const response = await fetch(`/terrain/publish/status/${encodeURIComponent(jobId)}`);
+                    data = await response.json();
+                    if (!data.success) throw new Error(data.error || 'Publiceringsjobb hittades inte.');
+                    if (data.status === 'running') await new Promise(resolve => setTimeout(resolve, 3000));
+                } while (data.status === 'running');
+
+                if (data.status !== 'done') throw new Error(data.error || 'Publiceringen misslyckades.');
+                if (data.catalog.apiKey) serviceKeys.set(data.catalog.catalogId, data.catalog.apiKey);
+                publicationMessages.delete(folderName);
+                await loadDownloads();
+            } catch (error) {
+                publicationMessages.set(folderName, error.message);
+                renderDownloads();
+            } finally {
+                publishingFolders.delete(folderName);
+                sessionStorage.removeItem('terrainPublishJob');
+                renderDownloads();
+            }
+        }
+
+        async function copyCatalogLink(alias) {
+            const catalog = catalogs.find(item => item.alias === alias);
+            if (!catalog) return;
+            try {
+                let key = serviceKeys.get(alias);
+                if (catalog.isPublic === false && !key) {
+                    key = prompt('Ange API-nyckeln för katalogen, eller generera en ny:');
+                    if (!key) return;
+                    if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Ogiltig API-nyckel.');
+                    serviceKeys.set(alias, key);
+                }
+                await navigator.clipboard.writeText(serviceTileUrl(catalog, key));
+                publicationMessages.set(catalog.folderName, 'XYZ-länk kopierad.');
+            } catch (error) {
+                publicationMessages.set(catalog.folderName, 'Kunde inte kopiera länken.');
+            }
+            renderDownloads();
+        }
+
+        async function setCatalogAccess(alias, isPublic, rotateKey = false) {
+            const catalog = catalogs.find(item => item.alias === alias);
+            if (!catalog) return;
+            try {
+                const response = await fetch(`/terrain/${encodeURIComponent(alias)}/access`, {
+                    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ isPublic, rotateKey })
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'Kunde inte ändra åtkomst.');
+                serviceKeys.delete(alias);
+                if (result.apiKey) serviceKeys.set(alias, result.apiKey);
+                publicationMessages.set(catalog.folderName, result.apiKey ? 'Ny API-nyckel visas endast i denna flik. Kopiera länken nu.' : isPublic ? 'Tjänsten är publik.' : 'Tjänsten är privat.');
+                await loadDownloads();
+            } catch (error) {
+                publicationMessages.set(catalog.folderName, error.message);
+                renderDownloads();
+            }
+        }
+
+        async function rotateCatalogKey(alias) {
+            if (!confirm('Skapa en ny API-nyckel? Den förra slutar fungera direkt.')) return;
+            await setCatalogAccess(alias, false, true);
+        }
+
+        async function unpublishCatalog(alias) {
+            const catalog = catalogs.find(item => item.alias === alias);
+            if (!catalog || !confirm(`Avpublicera "${catalog.title}" och radera dess karttiles? Nedladdade originalfiler behålls.`)) return;
+            try {
+                const response = await fetch(`/terrain/${encodeURIComponent(alias)}`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!data.success) throw new Error(data.error || 'Kunde inte avpublicera.');
+                serviceKeys.delete(alias);
+                publicationMessages.delete(catalog.folderName);
+                await loadDownloads();
+            } catch (error) {
+                publicationMessages.set(catalog.folderName, error.message);
+                renderDownloads();
+            }
+        }
         
         async function deleteFolder(folderName) {
-            if (!confirm(`Är du säker på att du vill ta bort "${folderName}"?\n\nDetta går inte att ångra.`)) {
+            if (!confirm(`Ta bort "${folderName}" och alla publicerade kataloger/tiles som hör till mappen?\n\nDetta går inte att ångra.`)) {
                 return;
             }
             
@@ -261,7 +416,7 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    alert('Mappen har tagits bort');
+                    publicationMessages.delete(folderName);
                     await loadDownloads();
                 } else {
                     throw new Error(data.error);
@@ -433,6 +588,10 @@
         // Cargar al inicio
         loadDownloads();
         pollJobs();
+        try {
+            const pending = JSON.parse(sessionStorage.getItem('terrainPublishJob') || 'null');
+            if (pending && pending.id) waitForPublication(pending.id, pending.folderName);
+        } catch (error) { sessionStorage.removeItem('terrainPublishJob'); }
     </script>
 </body>
 </html>

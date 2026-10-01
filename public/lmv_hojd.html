@@ -6,24 +6,11 @@
     <title>Ladda ner LMV Höjddata (Markhöjdmodell)</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-    <link rel="stylesheet" href="./css/style.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-        <header class="main-header">
-          <div class="brand-wrap">
-            <img src="images/MGIS-logo_azul.png" alt="logo" class="site-logo">
-            <div class="brand">LMV Data Downloader</div>
-          </div>
-            <nav>
-                <a href="index.html">Hem</a>
-                <a href="artdata.html">ArtData</a>
-              <a href="lmv.html">Vektordata</a>
-              <a href="lmv_hojd.html" class="active">Höjddata</a>
-              <a href="downloads.html">📦 Nedladdningar</a>
-              <a href="hjalp.html" target="_blank" style="color:#3273dc;font-weight:bold;">Hjälp</a>
-            </nav>
-        </header>   
+        <div id="site-header"></div>
     <div class="container">
 <!--         <a href="lmv.html" class="nav-link">← Gå till Vektordata (Byggnader/Fastigheter)</a>
  -->        <h1>Ladda ner Höjddata (Markhöjdmodell)</h1>
@@ -65,16 +52,14 @@
           <strong>Viktigt:</strong> Använd ett token genererat i <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">API Manager</a> eller ett <em>systemkonto</em> från <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a>. Token måste ha rätt scopes för STAC (collections/assets).
         </p>
         
-        <div class="checkbox-group">
-            <input type="checkbox" id="remember-credentials">
-            <label for="remember-credentials">Kom ihåg inloggning</label>
-        </div>
-
         <div class="geo-panel">
             <label for="lan-select">Välj län (valfritt):</label>
             <select id="lan-select">
                 <option value="" selected>– Ingen länsbegränsning –</option>
             </select>
+          <label for="geojson-upload">Ladda upp GeoJSON (Polygon / MultiPolygon):</label>
+          <input type="file" id="geojson-upload" accept=".geojson,.json,application/geo+json" />
+          <small>Filen kan vara i EPSG:4326, EPSG:3857 eller EPSG:3006. Vi konverterar automatiskt till WGS84 innan sökningen.</small>
           <label for="hojd-collection-select" style="display:none;"></label>
           <select id="hojd-collection-select" style="display:none;">
             <option value="" selected></option>
@@ -103,12 +88,8 @@
     <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
     
     <script>
-      // Sistema de almacenamiento seguro de credenciales (soporta token o user/pass)
+      // Keep LMV credentials in the current form only; clear legacy browser values.
       (function() {
-        const apiUsernameInput = document.getElementById('apiUsername');
-        const apiKeyInput = document.getElementById('apiKey');
-        const apiTokenInput = document.getElementById('apiToken');
-        const rememberCheckbox = document.getElementById('remember-credentials');
         const authRadios = document.getElementsByName('auth-method');
         const userpassFields = document.getElementById('userpass-fields');
         const tokenField = document.getElementById('token-field');
@@ -124,25 +105,10 @@
           }
         }
 
+        ['lmv_hojd_username', 'lmv_hojd_apikey', 'lmv_hojd_token', 'lmv_hojd_remember'].forEach(key => localStorage.removeItem(key));
         const savedMethod = localStorage.getItem('lmv_hojd_auth_method') || 'userpass';
         Array.from(authRadios).forEach(r => { if (r.value === savedMethod) r.checked = true; });
         updateAuthVisibility();
-
-        const savedUsername = localStorage.getItem('lmv_hojd_username');
-        const savedApiKey = localStorage.getItem('lmv_hojd_apikey');
-        const savedToken = localStorage.getItem('lmv_hojd_token');
-        const rememberState = localStorage.getItem('lmv_hojd_remember') === 'true';
-        
-        if (rememberState) {
-          rememberCheckbox.checked = true;
-          if (savedMethod === 'userpass' && savedUsername && savedApiKey) {
-            apiUsernameInput.value = savedUsername;
-            apiKeyInput.value = atob(savedApiKey);
-          }
-          if (savedMethod === 'token' && savedToken) {
-            apiTokenInput.value = atob(savedToken);
-          }
-        }
 
         Array.from(authRadios).forEach(r => r.addEventListener('change', function() {
           localStorage.setItem('lmv_hojd_auth_method', this.value);
@@ -153,49 +119,10 @@
           if (parentLabel && parentLabel.classList) parentLabel.classList.add('active');
         }));
 
-        rememberCheckbox.addEventListener('change', function() {
-          if (this.checked) {
-            const method = Array.from(authRadios).find(r => r.checked).value;
-            localStorage.setItem('lmv_hojd_auth_method', method);
-            if (method === 'userpass') {
-              const username = apiUsernameInput.value; const key = apiKeyInput.value;
-              if (username && key) {
-                localStorage.setItem('lmv_hojd_username', username);
-                localStorage.setItem('lmv_hojd_apikey', btoa(key));
-                localStorage.setItem('lmv_hojd_remember', 'true');
-              }
-            } else {
-              const token = apiTokenInput.value;
-              if (token) {
-                localStorage.setItem('lmv_hojd_token', btoa(token));
-                localStorage.setItem('lmv_hojd_remember', 'true');
-              }
-            }
-          } else {
-            localStorage.removeItem('lmv_hojd_username');
-            localStorage.removeItem('lmv_hojd_apikey');
-            localStorage.removeItem('lmv_hojd_token');
-            localStorage.removeItem('lmv_hojd_remember');
-          }
-        });
-
-        [apiUsernameInput, apiKeyInput, apiTokenInput].forEach(input => {
-          input && input.addEventListener('input', function() {
-            if (rememberCheckbox.checked) {
-              const method = Array.from(authRadios).find(r => r.checked).value;
-              localStorage.setItem('lmv_hojd_auth_method', method);
-              if (method === 'userpass') {
-                localStorage.setItem('lmv_hojd_username', apiUsernameInput.value);
-                localStorage.setItem('lmv_hojd_apikey', btoa(apiKeyInput.value));
-              } else {
-                localStorage.setItem('lmv_hojd_token', btoa(apiTokenInput.value));
-              }
-            }
-          });
-        });
       })();
     </script>
     
+    <script src="auth-nav.js" defer></script>
     <script src="script_lmv_hojd.js"></script>
     <div id="global-notification" class="notification" style="display:none; position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9999; width:min(900px,90%); text-align:center;"></div>
 </body>

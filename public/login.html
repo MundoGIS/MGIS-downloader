@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Logga in | MGIS</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="login-page">
+    <main>
+        <h1>MGIS Downloader</h1>
+        <p id="setup" role="status">Administratörskonto saknas. Kör <code>npm.cmd run admin:init</code> i en terminal på servern och välj ett eget lösenord med minst 6 tecken. Ladda sedan om sidan.</p>
+        <form id="login">
+            <label for="username">Användarnamn</label><input id="username" name="username" autocomplete="username" required>
+            <label for="password">Lösenord</label>
+            <div class="password-field"><input id="password" name="password" type="password" autocomplete="current-password" required><button id="togglePassword" type="button" aria-label="Visa lösenord" title="Visa lösenord"><i data-lucide="eye">Visa</i></button></div>
+            <label class="remember" for="remember"><input id="remember" name="remember" type="checkbox"> Kom ihåg mig i 30 dagar</label>
+            <button type="submit">Logga in</button>
+            <p id="error" role="alert"></p>
+        </form>
+    </main>
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script>
+        for (const key of ['lmv_username', 'lmv_apikey', 'lmv_token', 'lmv_remember', 'lmv_hojd_username', 'lmv_hojd_apikey', 'lmv_hojd_token', 'lmv_hojd_remember']) {
+            localStorage.removeItem(key);
+        }
+        window.lucide?.createIcons();
+        fetch('/auth/setup-status').then(response => response.json()).then(({ adminConfigured }) => {
+            if (!adminConfigured) {
+                document.getElementById('setup').style.display = 'block';
+                document.querySelector('#login button[type="submit"]').disabled = true;
+            }
+        }).catch(() => {});
+        document.getElementById('togglePassword').addEventListener('click', event => {
+            const password = document.getElementById('password');
+            const visible = password.type === 'password';
+            password.type = visible ? 'text' : 'password';
+            event.currentTarget.setAttribute('aria-label', visible ? 'Dölj lösenord' : 'Visa lösenord');
+            event.currentTarget.title = visible ? 'Dölj lösenord' : 'Visa lösenord';
+            event.currentTarget.innerHTML = visible ? '<i data-lucide="eye-off">Dölj</i>' : '<i data-lucide="eye">Visa</i>';
+            window.lucide?.createIcons();
+        });
+        document.getElementById('login').addEventListener('submit', async event => {
+            event.preventDefault();
+            const button = event.target.querySelector('button[type="submit"]');
+            button.disabled = true;
+            const error = document.getElementById('error');
+            error.textContent = '';
+            try {
+                const response = await fetch('/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: event.target.elements.username.value, password: event.target.elements.password.value, remember: event.target.elements.remember.checked }) });
+                if (!response.ok) throw new Error(response.status === 429 ? 'För många försök. Försök senare.' : 'Fel användarnamn eller lösenord.');
+                const next = new URLSearchParams(location.search).get('next');
+                location.assign(next && next.startsWith('/') && !next.startsWith('//') && !next.includes('\\') && next.length < 1000 ? next : '/');
+            } catch (failure) {
+                error.textContent = failure.message;
+                button.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

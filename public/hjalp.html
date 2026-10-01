@@ -5,17 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Hjälp: Skapa konto och aktivera åtkomst (LMV & GBIF)</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
-    <style>
-        .help-container { max-width: 980px; margin: 0 auto; }
-        .tab-content { padding-top: 1rem; }
-        .note { background:#f5f7ff; padding:15px; border-left:4px solid #3273dc; margin-bottom: 1.5rem; }
-        .step-box { margin-bottom: 1.5rem; }
-        .api-url-box { background: #f0f0f0; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.9rem; border: 1px solid #ddd; margin-top: 5px; display: flex; justify-content: space-between; align-items: center; }
-        .browser-link { font-size: 0.75rem; font-weight: bold; text-transform: uppercase; margin-left: 10px; }
-        strong { color: #363636; }
-    </style>
+    <link rel="stylesheet" href="css/style.css">
 </head>
-<body>
+<body class="help-page">
+    <div id="site-header"></div>
     <section class="section">
         <div class="container help-container">
             <h1 class="title">Hjälp: Skapa konto och aktivera åtkomst</h1>
@@ -153,5 +146,6 @@ curl -H "Authorization: Bearer <YOUR_TOKEN>" -H "Range: bytes=0-1023" "https://a
             });
         });
     </script>
+    <script src="auth-nav.js" defer></script>
 </body>
 </html>

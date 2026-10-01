@@ -5,6 +5,7 @@
  */
 require('dotenv').config();
 const express = require('express');
+const { rateLimit } = require('express-rate-limit');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const fs = require('fs');
@@ -13,16 +14,315 @@ const { URL } = require('url');
 const http = require('http');
 const unzipper = require('unzipper');
 const { spawn } = require('child_process');
+const { randomUUID, randomBytes, createHash } = require('crypto');
 const archiver = require('archiver');
+const { installAuth } = require('./auth');
+const { MAX_ZOOM, overzoomTile } = require('./terrain-tiles');
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3004;
 const LAN_GEOJSON_PATH = path.join(__dirname, 'data', 'lan.geojson');
 
 const jobs = new Map();
 const FINISHED_JOB_TTL_MS = 12 * 60 * 60 * 1000;
+const TERRAIN_CATALOGS_FILE = path.join(__dirname, 'terrain_catalogs.json');
+const TERRAIN_PUBLIC_ROOT = path.join(__dirname, 'terrain');
+const DEFAULT_TERRAIN_RESOLUTION = 10;
+const ALLOWED_TERRAIN_RESOLUTIONS = new Set([10, 20, 50, 100]);
+const activePublications = new Set();
+const publicationJobs = new Map();
 
 app.use(bodyParser.json({ limit: '50mb' }));
+app.set('trust proxy', 'loopback');
+installAuth(app, { getCatalog: alias => loadPublishedCatalogs()[alias] });
 app.use(express.static('public'));
+const downloadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+
+function ensureTerrainCatalogStore() {
+    try {
+        fs.mkdirSync(TERRAIN_PUBLIC_ROOT, { recursive: true });
+    } catch (e) {
+        console.warn('[TERRAIN] Kunde inte skapa katalogroot:', e.message);
+    }
+
+    try {
+        if (!fs.existsSync(TERRAIN_CATALOGS_FILE)) {
+            fs.writeFileSync(TERRAIN_CATALOGS_FILE, JSON.stringify({}, null, 2));
+        }
+    } catch (e) {
+        console.warn('[TERRAIN] Kunde inte skapa katalogindex:', e.message);
+    }
+}
+
+function normalizeCatalogAlias(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    const normalized = raw.replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+    return normalized || 'catalog';
+}
+
+function loadPublishedCatalogs() {
+    ensureTerrainCatalogStore();
+    try {
+        const raw = fs.readFileSync(TERRAIN_CATALOGS_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+        writeToLog(`[TERRAIN] Kunde inte läsa katalogindex: ${error.message}`);
+        return {};
+    }
+}
+
+function savePublishedCatalogs(catalogs) {
+    ensureTerrainCatalogStore();
+    try {
+        fs.writeFileSync(TERRAIN_CATALOGS_FILE, JSON.stringify(catalogs, null, 2));
+    } catch (error) {
+        writeToLog(`[TERRAIN] Kunde inte spara katalogindex: ${error.message}`);
+        throw error;
+    }
+}
+
+function newServiceKey() {
+    const key = randomBytes(32).toString('hex');
+    return { key, hash: createHash('sha256').update(key).digest('hex') };
+}
+
+function removePublishedCatalogs(catalogs, aliases) {
+    const outputs = aliases.filter(alias => catalogs[alias]).map(alias => {
+        const entry = catalogs[alias];
+        const output = path.resolve(entry.publicFolder || path.join(TERRAIN_PUBLIC_ROOT, alias));
+        if (!output.startsWith(TERRAIN_PUBLIC_ROOT + path.sep)) {
+            throw new Error('Ogiltig publiceringsmapp: ' + alias);
+        }
+        return { alias, output };
+    });
+    for (const { alias, output } of outputs) {
+        fs.rmSync(output, { recursive: true, force: true });
+        delete catalogs[alias];
+    }
+    savePublishedCatalogs(catalogs);
+}
+
+function safeJoinWithinBase(basePath, ...parts) {
+    const target = path.resolve(basePath, ...parts);
+    if (target !== basePath && !target.startsWith(basePath + path.sep)) {
+        throw new Error('Ogiltig katalogsökväg');
+    }
+    return target;
+}
+
+function runGdalCommand(exePath, args, cwd = null) {
+    return new Promise((resolve, reject) => {
+        if (!exePath || !fs.existsSync(exePath)) {
+            return reject(new Error(`Falta el ejecutable GDAL: ${exePath || '<no definido>'}. Revisa GDAL/QGIS en .env.`));
+        }
+
+        const child = spawn(exePath, args, { cwd: cwd || __dirname, windowsHide: true, env: GDAL_ENV });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+        child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+        child.on('error', err => reject(err));
+        child.on('close', code => {
+            if (code === 0) return resolve({ stdout, stderr });
+            reject(new Error(stderr.trim() || stdout.trim() || `GDAL process exited with code ${code}`));
+        });
+    });
+}
+
+function validateGdalBinarySet() {
+    const required = [
+        { name: 'gdalbuildvrt', path: GDAL_BUILDVRT_CMD },
+        { name: 'gdalinfo', path: GDAL_GDALINFO_CMD },
+        { name: 'gdal_translate', path: GDAL_TRANSLATE_CMD },
+        { name: 'gdalwarp', path: GDAL_WARP_CMD },
+        { name: 'gdaldem', path: GDAL_DEM_CMD },
+        { name: 'gdal2tiles Python', path: GDAL_TILES_PYTHON },
+        { name: 'gdal2tiles script', path: GDAL_TILES_SCRIPT }
+    ];
+
+    const missing = required.filter(item => !item.path || !fs.existsSync(item.path));
+    if (missing.length) {
+        const message = `FALTAN BINARIOS GDAL: ${missing.map(item => item.name).join(', ')}. Revisa GDAL/QGIS en .env.`;
+        console.error(message);
+        return { ok: false, message, missing };
+    }
+
+    return { ok: true, message: 'GDAL OK', missing: [] };
+}
+
+async function detectRasterCrs(rasterPath) {
+    try {
+        const { stdout } = await runGdalCommand(GDAL_GDALINFO_CMD, ['-json', rasterPath]);
+        const info = JSON.parse(stdout);
+        if (info && info.coordinateSystem && info.coordinateSystem.wkt) {
+            return info.coordinateSystem.wkt;
+        }
+        if (info && info.srs) return info.srs;
+        return null;
+    } catch (error) {
+        writeToLog(`[TERRAIN] Kunde inte läsa CRS för ${rasterPath}: ${error.message}`);
+        return null;
+    }
+}
+
+async function publishTerrainRasterFolder(folderName, alias, resolutionMeters, hillshadeStyle = { altitude: 35, strength: 1.7 }) {
+    const sourceRoot = path.join(__dirname, folderName);
+    const publicRoot = path.join(__dirname, 'terrain');
+    fs.mkdirSync(publicRoot, { recursive: true });
+    const outDir = path.join(publicRoot, `${alias}-${Date.now()}`);
+    fs.mkdirSync(outDir, { recursive: true });
+
+    const rasterFiles = fs.readdirSync(sourceRoot)
+        .filter(file => /\.tiff?$/i.test(file))
+        .sort();
+
+    if (!rasterFiles.length) {
+        throw new Error('Ingen TIFF hittades i nedladdningsmappen.');
+    }
+
+    try {
+        fs.writeFileSync(path.join(outDir, 'filelist.txt'), rasterFiles.map(file => path.join(sourceRoot, file)).join('\n') + '\n');
+        await runGdalCommand(GDAL_BUILDVRT_CMD, ['-input_file_list', 'filelist.txt', 'source.vrt'], outDir);
+        const warpArgs = [
+            '-t_srs', 'EPSG:3857',
+            '-r', 'average',
+            '-of', 'GTiff',
+            '-co', 'TILED=YES',
+            '-co', 'COMPRESS=DEFLATE',
+            '-co', 'PREDICTOR=2',
+            '-co', 'BIGTIFF=IF_SAFER',
+            'source.vrt', 'terrain_3857.tif'
+        ];
+        if (resolutionMeters !== 'original') warpArgs.splice(2, 0, '-tr', String(resolutionMeters), String(resolutionMeters));
+        await runGdalCommand(GDAL_WARP_CMD, warpArgs, outDir);
+        const { stdout } = await runGdalCommand(GDAL_GDALINFO_CMD, ['-json', 'terrain_3857.tif'], outDir);
+        const pixelSizeMeters = Math.abs(JSON.parse(stdout).geoTransform?.[1]);
+        if (!Number.isFinite(pixelSizeMeters) || pixelSizeMeters <= 0) throw new Error('Kunde inte läsa publicerad rasterupplösning.');
+        await runGdalCommand(GDAL_DEM_CMD, [
+            'hillshade', 'terrain_3857.tif', 'hillshade.tif',
+            '-alt', String(hillshadeStyle.altitude), '-z', String(hillshadeStyle.strength),
+            '-compute_edges', '-of', 'GTiff', '-co', 'COMPRESS=DEFLATE'
+        ], outDir);
+        const maxZoom = Math.max(0, Math.ceil(Math.log2(156543.03392804097 / pixelSizeMeters)));
+        await runGdalCommand(GDAL_TILES_PYTHON, [
+            GDAL_TILES_SCRIPT, '-q', '--xyz', '-p', 'mercator', '-z', `0-${maxZoom}`,
+            '-r', 'bilinear', '-w', 'none', 'hillshade.tif', 'tiles'
+        ], outDir);
+        const tilesRoot = path.join(outDir, 'tiles');
+        if (!fs.existsSync(path.join(tilesRoot, String(maxZoom))) || !fs.readdirSync(path.join(tilesRoot, String(maxZoom))).length) {
+            throw new Error('GDAL skapade inga XYZ-tiles.');
+        }
+
+        const catalogInfo = {
+            alias,
+            title: alias.replace(/_/g, ' '),
+            folderName,
+            publicFolder: outDir,
+            targetCrs: 'EPSG:3857',
+            resolutionMeters,
+            hillshadeStyle,
+            pixelSizeMeters,
+            maxZoom,
+            files: ['terrain_3857.tif', 'hillshade.tif'],
+            generatedAt: new Date().toISOString()
+        };
+        fs.writeFileSync(path.join(outDir, 'catalog.json'), JSON.stringify(catalogInfo, null, 2));
+        return { outDir, catalogInfo };
+    } catch (error) {
+        fs.rmSync(outDir, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+function getPublicBaseUrl(req, alias) {
+    const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
+    const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
+    return `${protocol}://${host}/terrain/${alias}`;
+}
+
+function buildCatalogConfig(req, catalog) {
+    const baseUrl = getPublicBaseUrl(req, catalog.alias);
+    const resolutionMeters = catalog.resolutionMeters || DEFAULT_TERRAIN_RESOLUTION;
+    return {
+        catalogId: catalog.alias,
+        title: catalog.title,
+        alias: catalog.alias,
+        folderName: catalog.folderName,
+        publicUrl: baseUrl,
+        resolutionMeters,
+        hillshadeStyle: catalog.hillshadeStyle || { altitude: 45, strength: 1 },
+        sourceCrs: catalog.sourceCrs || 'EPSG:3006',
+        targetCrs: 'EPSG:3857',
+        tileUrl: `${baseUrl}/tiles/{z}/{x}/{y}.png`,
+        isPublic: catalog.isPublic !== false,
+        nativeMaxZoom: catalog.generated && catalog.generated.maxZoom,
+        maxZoom: MAX_ZOOM,
+        status: catalog.status || 'ready',
+        updatedAt: catalog.updatedAt || new Date().toISOString()
+    };
+}
+
+async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title, resolutionMeters, rawStyle) {
+    const folderName = String(rawFolderName || '').trim();
+    const folderPath = path.join(__dirname, folderName);
+    if (!/^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(folderName) || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+        throw new Error('Ogiltig LMV-downloadmapp');
+    }
+    if (jobUsingFolder(folderName)) {
+        throw new Error('Nedladdningen pågår fortfarande. Vänta tills jobbet är klart.');
+    }
+
+    const alias = normalizeCatalogAlias(providedAlias || folderName.replace(/^LMV_DOWNLOADS_/, ''));
+    const catTitle = String(title || alias.replace(/_/g, ' ')).trim() || alias;
+    if (resolutionMeters !== 'original' && !ALLOWED_TERRAIN_RESOLUTIONS.has(Number(resolutionMeters))) throw new Error('Välj original eller 10, 20, 50 eller 100 meter.');
+    const safeResolution = resolutionMeters === 'original' ? 'original' : Number(resolutionMeters);
+    const hillshadeStyle = { altitude: Number(rawStyle?.altitude ?? 35), strength: Number(rawStyle?.strength ?? 1.7) };
+    if (!Number.isFinite(hillshadeStyle.altitude) || hillshadeStyle.altitude < 15 || hillshadeStyle.altitude > 80 ||
+        !Number.isFinite(hillshadeStyle.strength) || hillshadeStyle.strength < 0.5 || hillshadeStyle.strength > 3) {
+        throw new Error('Ljusvinkel måste vara 15-80° och reliefstyrka 0,5-3.');
+    }
+    const required = validateGdalBinarySet();
+    if (!required.ok) throw new Error(required.message);
+
+    const catalogs = loadPublishedCatalogs();
+    if (activePublications.has(alias)) throw new Error('Katalogen publiceras redan.');
+    activePublications.add(alias);
+    try {
+        const generated = await publishTerrainRasterFolder(folderName, alias, safeResolution, hillshadeStyle);
+        const previous = catalogs[alias];
+        const newKey = !previous || (previous.isPublic === false && !previous.apiKeyHash) ? newServiceKey() : null;
+        const entry = {
+            alias,
+            title: catTitle,
+            folderName,
+            publicFolder: generated.outDir,
+            publicUrl: getPublicBaseUrl(req, alias),
+            resolutionMeters: safeResolution,
+            hillshadeStyle,
+            sourceCrs: 'detected by GDAL',
+            targetCrs: 'EPSG:3857',
+            status: 'ready',
+            isPublic: previous ? previous.isPublic !== false : false,
+            apiKeyHash: newKey ? newKey.hash : previous.apiKeyHash,
+            updatedAt: new Date().toISOString(),
+            generated: generated.catalogInfo
+        };
+        catalogs[alias] = entry;
+        savePublishedCatalogs(catalogs);
+        if (previous && previous.publicFolder !== generated.outDir) {
+            try {
+                const oldOutput = path.resolve(previous.publicFolder || path.join(TERRAIN_PUBLIC_ROOT, alias));
+                if (!oldOutput.startsWith(TERRAIN_PUBLIC_ROOT + path.sep)) throw new Error('Ogiltig publiceringsmapp');
+                fs.rmSync(oldOutput, { recursive: true, force: true });
+            } catch (error) {
+                writeToLog(`[TERRAIN] Kunde inte rensa tidigare publicering: ${error.message}`);
+            }
+        }
+        return { alias, entry, config: { ...buildCatalogConfig(req, entry), ...(newKey && { apiKey: newKey.key }) } };
+    } finally {
+        activePublications.delete(alias);
+    }
+}
 
 // --- CONFIGURACIÓN ---
 const GDAL_ROOT = process.env.GDAL ? process.env.GDAL.trim() : null;
@@ -41,16 +341,32 @@ const GDAL_TRANSLATE_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdal_translate.exe' : 'gdal_translate'
 );
+const GDAL_WARP_CMD = path.join(
+    GDAL_BIN,
+    process.platform === 'win32' ? 'gdalwarp.exe' : 'gdalwarp'
+);
+const GDAL_DEM_CMD = path.join(GDAL_BIN, process.platform === 'win32' ? 'gdaldem.exe' : 'gdaldem');
+const GDAL_PYTHON_ROOT = path.join(GDAL_ROOT || GDAL_BIN, '..', 'Python312');
+const GDAL_TILES_PYTHON = process.env.GDAL_TILES_PYTHON || path.join(GDAL_PYTHON_ROOT, process.platform === 'win32' ? 'python.exe' : 'bin/python3');
+const GDAL_TILES_SCRIPT = process.env.GDAL_TILES_SCRIPT || path.join(GDAL_PYTHON_ROOT, 'Scripts', 'gdal2tiles.py');
 const MANIFEST_NAME = 'manifest.json';
 const COMBINED_HOJD_FOLDER = 'LMV_DOWNLOADS_markhojd';
 
 // Standalone GDAL exes need these to resolve CRS (SWEREF99 TM) outside the QGIS shell.
 const GDAL_ENV = { ...process.env };
+if (process.platform === 'win32') {
+    GDAL_ENV.PATH = [QGIS_ROOT, GDAL_ROOT, process.env.PATH].filter(Boolean).join(path.delimiter);
+}
 const gdalDataDir = GDAL_ROOT ? path.join(GDAL_ROOT, 'share', 'gdal') : null;
 const projDataDir = QGIS_ROOT ? path.join(QGIS_ROOT, '..', 'share', 'proj') : null;
 if (gdalDataDir && fs.existsSync(gdalDataDir)) GDAL_ENV.GDAL_DATA = gdalDataDir;
 if (projDataDir && fs.existsSync(projDataDir)) GDAL_ENV.PROJ_DATA = GDAL_ENV.PROJ_LIB = projDataDir;
-if (!fs.existsSync(GDAL_TRANSLATE_CMD)) console.warn(`VARNING: gdal_translate hittades inte: ${GDAL_TRANSLATE_CMD}. Kontrollera QGIS i .env.`);
+const gdalCheck = validateGdalBinarySet();
+if (!gdalCheck.ok) {
+    console.warn(gdalCheck.message);
+} else {
+    console.log('[GDAL] Todos los binarios necesarios fueron encontrados.');
+}
 
 // --- UTILIDADES ---
 const logFile = path.join(__dirname, 'process.log');
@@ -186,6 +502,7 @@ function loadManifest(folder, collectionId) {
             manifest.tiles[name] = { filename: name, downloaded: true, optimized: false, command: cogCommandString(name) };
         }
     }
+    for (const tile of Object.values(manifest.tiles)) delete tile.url;
     return manifest;
 }
 
@@ -387,6 +704,120 @@ function wktPolygonToGeoJSON(wkt) {
     } catch (e) { return null; }
 }
 
+function parseCrsName(rawCrs) {
+    if (!rawCrs) return 'EPSG:4326';
+
+    if (typeof rawCrs === 'string') {
+        const cleaned = rawCrs.trim();
+        if (!cleaned) return 'EPSG:4326';
+        const normalized = cleaned
+            .replace(/^urn:ogc:def:crs:epsg::/i, 'EPSG:')
+            .replace(/^urn:ogc:def:crs:ogc:1.3:/i, '')
+            .replace(/^crs84$/i, 'EPSG:4326')
+            .replace(/^epsg:/i, 'EPSG:');
+
+        if (/^EPSG:\d+$/i.test(normalized)) return normalized.toUpperCase();
+        const match = normalized.match(/(EPSG|ESRI)[:\s]*(\d+)/i);
+        if (match) return `EPSG:${match[2]}`.toUpperCase();
+        return 'EPSG:4326';
+    }
+
+    if (rawCrs && rawCrs.type === 'name' && rawCrs.properties && rawCrs.properties.name) {
+        return parseCrsName(rawCrs.properties.name);
+    }
+
+    if (rawCrs && rawCrs.properties && rawCrs.properties.code) {
+        return parseCrsName(rawCrs.properties.code);
+    }
+
+    return 'EPSG:4326';
+}
+
+function lonLatToWebMercator(lon, lat) {
+    const x = (lon * 20037508.34) / 180;
+    const y = Math.log(Math.tan(((90 + lat) * Math.PI) / 360)) / (Math.PI / 180);
+    return [x, y * 20037508.34 / 180];
+}
+
+function webMercatorToLonLat(x, y) {
+    const lon = (x / 20037508.34) * 180;
+    const lat = (2 * Math.atan(Math.exp((y / 20037508.34) * Math.PI)) - Math.PI / 2) * (180 / Math.PI);
+    return [lon, lat];
+}
+
+function sweref99tmToWgs84(x, y) {
+    const a = 6378137;
+    const f = 1 / 298.257222101;
+    const e2 = 1 - (1 - f) * (1 - f);
+    const ePrime2 = e2 / (1 - e2);
+    const k0 = 0.9996;
+    const x0 = 500000;
+
+    const x1 = x - x0;
+    const M = y / k0;
+    const mu = M / (a * (1 - e2 / 4 - (3 * e2 * e2) / 64 - (5 * e2 * e2 * e2) / 256));
+    const e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+
+    const phi1 = mu +
+        ((3 * e1 / 2) - (27 * e1 * e1 * e1 / 32)) * Math.sin(2 * mu) +
+        ((21 * e1 * e1 / 16) - (55 * e1 * e1 * e1 * e1 / 32)) * Math.sin(4 * mu) +
+        ((151 * e1 * e1 * e1 / 96)) * Math.sin(6 * mu);
+
+    const C1 = ePrime2 * Math.cos(phi1) * Math.cos(phi1);
+    const T1 = Math.tan(phi1) * Math.tan(phi1);
+    const N1 = a / Math.sqrt(1 - e2 * Math.sin(phi1) * Math.sin(phi1));
+    const R1 = a * (1 - e2) / Math.pow(1 - e2 * Math.sin(phi1) * Math.sin(phi1), 1.5);
+    const D = x1 / (N1 * k0);
+
+    const lat = phi1 - (N1 * Math.tan(phi1) / R1) * (
+        (D * D) / 2 -
+        ((5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ePrime2) * Math.pow(D, 4)) / 24 +
+        ((61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * ePrime2 - 3 * C1 * C1) * Math.pow(D, 6)) / 720
+    );
+
+    const lon = (15 * Math.PI / 180) + (
+        D -
+        ((1 + 2 * T1 + C1) * Math.pow(D, 3)) / 6 +
+        ((5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ePrime2 + 24 * T1 * T1) * Math.pow(D, 5)) / 120
+    ) / Math.cos(phi1);
+
+    return [lon * (180 / Math.PI), lat * (180 / Math.PI)];
+}
+
+function projectPointToWgs84([x, y], sourceCrs = 'EPSG:4326') {
+    const normalized = parseCrsName(sourceCrs);
+
+    if (normalized === 'EPSG:4326') return [x, y];
+    if (normalized === 'EPSG:3857') return webMercatorToLonLat(x, y);
+    if (normalized === 'EPSG:3006') return sweref99tmToWgs84(x, y);
+
+    return [x, y];
+}
+
+function transformCoordinateTree(value, sourceCrs = 'EPSG:4326') {
+    if (!Array.isArray(value)) return value;
+
+    if (value.length >= 2 && typeof value[0] === 'number' && typeof value[1] === 'number') {
+        return projectPointToWgs84([value[0], value[1]], sourceCrs);
+    }
+
+    return value.map(item => transformCoordinateTree(item, sourceCrs));
+}
+
+function geometryFromFeatureCollection(featureCollection, sourceCrs) {
+    if (!featureCollection || !Array.isArray(featureCollection.features)) return null;
+
+    const polygons = featureCollection.features
+        .map(feature => normalizeGeometryPayload(feature, sourceCrs))
+        .filter(Boolean)
+        .flatMap(geometry => geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates);
+
+    if (!polygons.length) return null;
+    return polygons.length === 1
+        ? { type: 'Polygon', coordinates: polygons[0] }
+        : { type: 'MultiPolygon', coordinates: polygons };
+}
+
 function slugify(text) {
     if (!text) return '';
     return text
@@ -401,22 +832,58 @@ function slugify(text) {
         .substring(0, 60);
 }
 
-function normalizeGeometryPayload(rawGeometry) {
+function normalizeGeometryPayload(rawGeometry, inheritedCrs = 'EPSG:4326') {
     if (!rawGeometry) return null;
-    
-    // Si es string, intentar convertir de WKT a GeoJSON
+
     if (typeof rawGeometry === 'string') {
+        const trimmed = rawGeometry.trim();
+        if (!trimmed) return null;
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+                return normalizeGeometryPayload(JSON.parse(trimmed), inheritedCrs);
+            } catch (e) {
+                // fall through to WKT parsing
+            }
+        }
+
         const geoJson = wktPolygonToGeoJSON(rawGeometry);
-        console.log('[normalizeGeometryPayload] WKT convertido a GeoJSON:', JSON.stringify(geoJson));
-        return geoJson;
+        if (geoJson) {
+            console.log('[normalizeGeometryPayload] WKT convertido a GeoJSON:', JSON.stringify(geoJson));
+            return geoJson;
+        }
+        return null;
     }
-    
-    // Si ya es objeto GeoJSON, validar y retornar
-    if (typeof rawGeometry === 'object' && rawGeometry.type && rawGeometry.coordinates) {
-        console.log('[normalizeGeometryPayload] GeoJSON recibido directamente:', JSON.stringify(rawGeometry));
-        return rawGeometry;
+
+    if (typeof rawGeometry === 'object') {
+        const sourceCrs = parseCrsName(rawGeometry.crs || (rawGeometry.properties && rawGeometry.properties.crs) || inheritedCrs);
+        if (rawGeometry.type === 'Feature') {
+            if (rawGeometry.geometry) {
+                return normalizeGeometryPayload(rawGeometry.geometry, sourceCrs);
+            }
+            return null;
+        }
+
+        if (rawGeometry.type === 'FeatureCollection') {
+            return geometryFromFeatureCollection(rawGeometry, sourceCrs);
+        }
+
+        if (rawGeometry.type === 'GeometryCollection') {
+            const geometries = (rawGeometry.geometries || []).map(item => normalizeGeometryPayload(item, sourceCrs)).filter(Boolean);
+            if (!geometries.length) return null;
+            return { type: 'GeometryCollection', geometries };
+        }
+
+        if (rawGeometry.type && rawGeometry.coordinates) {
+            const transformed = { type: rawGeometry.type, coordinates: transformCoordinateTree(rawGeometry.coordinates, sourceCrs) };
+            console.log('[normalizeGeometryPayload] GeoJSON recibido y normalizado:', JSON.stringify(transformed));
+            return transformed;
+        }
+
+        if (rawGeometry.geometry && rawGeometry.geometry.type) {
+            return normalizeGeometryPayload(rawGeometry.geometry, sourceCrs);
+        }
     }
-    
+
     console.warn('[normalizeGeometryPayload] Formato de geometría no reconocido:', typeof rawGeometry, rawGeometry);
     return null;
 }
@@ -469,12 +936,7 @@ async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, co
                     return { ok: true, status: getRes.status };
                 } catch (getErr) {
                     const status = getErr.response ? getErr.response.status : null;
-                    try {
-                        const respBody = getErr.response && getErr.response.data ? JSON.stringify(getErr.response.data).slice(0,800) : getErr.message;
-                        writeToLog(`[VALIDATION] Asset GET failed for collection=${collectionId} apiType=${apiType} status=${status} detail=${respBody}`);
-                    } catch (e) {
-                        writeToLog(`[VALIDATION] Asset GET failed for collection=${collectionId} apiType=${apiType} status=${status} (could not stringify response)`);
-                    }
+                    writeToLog(`[VALIDATION] Asset GET failed for collection=${collectionId} apiType=${apiType} status=${status}`);
                     return { ok: false, status, message: getErr.message };
                 }
             }
@@ -482,13 +944,8 @@ async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, co
     } catch (err) {
         // Si la búsqueda falla con 401/403 interpretarlo como credenciales inválidas
         const status = err.response ? err.response.status : null;
-        try {
-            const respBody = err.response && err.response.data ? JSON.stringify(err.response.data).slice(0,800) : err.message;
-            writeToLog(`[VALIDATION] Search failed for collection=${collectionId} apiType=${apiType} status=${status} detail=${respBody}`);
-        } catch (e) {
-            writeToLog(`[VALIDATION] Search failed for collection=${collectionId} apiType=${apiType} status=${status} (could not stringify response)`);
-        }
-        if (status === 401 || status === 403) return { ok: false, status, message: err.message };
+        writeToLog(`[VALIDATION] Search failed for collection=${collectionId} apiType=${apiType} status=${status}`);
+        if (status === 401 || status === 403) return { ok: false, status };
         // En otros errores, continuar con comprobación por collections como fallback
     }
 
@@ -507,13 +964,8 @@ async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, co
         return { ok: true, status: res.status };
     } catch (err) {
         const status = err.response ? err.response.status : null;
-        try {
-            const respBody = err.response && err.response.data ? JSON.stringify(err.response.data).slice(0,800) : err.message;
-            writeToLog(`[VALIDATION] Collections check failed for apiType=${apiType} status=${status} detail=${respBody}`);
-        } catch (e) {
-            writeToLog(`[VALIDATION] Collections check failed for apiType=${apiType} status=${status} (could not stringify response)`);
-        }
-        return { ok: false, status, message: err.message };
+        writeToLog(`[VALIDATION] Collections check failed for apiType=${apiType} status=${status}`);
+        return { ok: false, status };
     }
 }
 
@@ -621,7 +1073,7 @@ app.post('/get-occurrence-count', async (req, res) => {
 });
 
 // Endpoint para crear una descarga en GBIF
-app.post('/create-download', async (req, res) => {
+app.post('/create-download', downloadLimiter, async (req, res) => {
     const { username, password, speciesKey, geometry, basisOfRecord } = req.body;
     
     if (!username || !password || !speciesKey || !geometry) {
@@ -906,7 +1358,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                 await abortableDelay(10000, abortSignal);
                 continue; 
             }
-            writeToLog(`[${collectionId}] Fel vid paginering: ${error.message}. Avbryter sökning.`);
+            writeToLog(`[${collectionId}] Fel vid paginering (HTTP ${searchStatus || 'okänt'}). Avbryter sökning.`);
             nextUrl = null;
         }
     }
@@ -998,7 +1450,6 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                     Object.assign(tile, {
                         filename,
                         id: itemData.id,
-                        url,
                         bbox: itemData.bbox,
                         downloaded: true,
                         downloadedAt: tile.downloadedAt || new Date().toISOString(),
@@ -1061,9 +1512,9 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                     console.warn(`[${collectionId}] 429 Rate Limit. Esperando ${waitTime/1000}s...`);
                     await abortableDelay(waitTime, abortSignal);
                 } else {
-                    console.warn(`[${collectionId}] Fel vid nedladdning ${filename}: ${error.message}. Försök ${attempt}/${maxRetries}`);
+                    console.warn(`[${collectionId}] Fel vid nedladdning ${filename} (HTTP ${status || 'okänt'}). Försök ${attempt}/${maxRetries}`);
                     if (attempt === maxRetries) {
-                        writeToLog(`[${collectionId}] Gav upp ${filename} efter ${maxRetries} försök: ${error.message}`);
+                        writeToLog(`[${collectionId}] Gav upp ${filename} efter ${maxRetries} försök (HTTP ${status || 'okänt'}).`);
                         if (job) job.progress.failed = (job.progress.failed || 0) + 1;
                     }
                     await abortableDelay(2000 * attempt, abortSignal);
@@ -1171,7 +1622,7 @@ function finishJob(job) {
         job.message = `Nedladdningen av ${what} avbröts: Lantmäteriet nekade inloggningen (token har troligen gått ut). Starta igen med nytt token – redan nedladdade filer hoppas över.`;
     } else if (job.error) {
         job.status = 'failed';
-        job.message = `Nedladdningen av ${what} misslyckades: ${job.error.message}`;
+        job.message = `Nedladdningen av ${what} misslyckades. Kontrollera jobbstatus och försök igen.`;
     } else if (job.totalFound === 0) {
         job.status = 'done';
         job.message = `Inga data hittades för ${what}.`;
@@ -1216,7 +1667,7 @@ function jobUsingFolder(folderName) {
 }
 
 // --- RUTA DE INICIO DE DESCARGA ---
-app.post('/lmv/start-full-download', async (req, res) => {
+app.post('/lmv/start-full-download', downloadLimiter, async (req, res) => {
     const { apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel } = req.body;
 
     // Standardvärde: om apiType saknas används 'vektor' (bakåtkompatibilitet)
@@ -1327,8 +1778,8 @@ app.post('/lmv/start-full-download', async (req, res) => {
             }
         })
         .catch(err => {
-            console.error(`[${collectionId}] Error tarea fondo:`, err);
-            if (!abortController.signal.aborted) job.error = err;
+            console.error(`[${collectionId}] Bakgrundsjobb misslyckades (${err.code || 'okänt fel'}).`);
+            if (!abortController.signal.aborted) job.error = err.code === 'LMV_AUTH' ? err : new Error('LMV_DOWNLOAD_FAILED');
         })
         .finally(() => finishJob(job));
 });
@@ -1438,9 +1889,170 @@ app.get('/lmv/downloads/download/:folderName', (req, res) => {
     archive.finalize();
 });
 
+app.get('/terrain/catalogs', (req, res) => {
+    try {
+        const catalogs = Object.values(loadPublishedCatalogs()).map(item => ({
+            alias: item.alias,
+            title: item.title,
+            folderName: item.folderName,
+            tileUrl: buildCatalogConfig(req, item).tileUrl,
+            resolutionMeters: item.resolutionMeters,
+            hillshadeStyle: item.hillshadeStyle || { altitude: 45, strength: 1 },
+            isPublic: item.isPublic !== false,
+            targetCrs: item.targetCrs || 'EPSG:3857',
+            updatedAt: item.updatedAt
+        }));
+        res.json({ success: true, supportsCleanup: true, catalogs });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/terrain/publish', (req, res) => {
+    const { folderName, alias, title, resolutionMeters, hillshadeStyle } = req.body || {};
+    if (jobUsingFolder(folderName)) return res.status(409).json({ success: false, error: 'Vänta tills nedladdningen är klar.' });
+    if ([...publicationJobs.values()].some(job => job.folderName === folderName && job.status === 'running')) return res.status(409).json({ success: false, error: 'Mappen publiceras redan.' });
+    const normalizedAlias = normalizeCatalogAlias(alias || String(folderName || '').replace(/^LMV_DOWNLOADS_/, ''));
+    if (activePublications.has(normalizedAlias)) return res.status(409).json({ success: false, error: 'Katalogen publiceras redan.' });
+
+    const id = randomUUID();
+    const job = { id, folderName, alias: normalizedAlias, status: 'running', startedAt: new Date().toISOString() };
+    publicationJobs.set(id, job);
+    ensureCatalogAndMetadata(req, folderName, alias, title, resolutionMeters, hillshadeStyle)
+        .then(({ config }) => {
+            job.status = 'done';
+            job.catalog = config;
+        })
+        .catch(error => {
+            job.status = 'failed';
+            job.error = error.message;
+            writeToLog(`[TERRAIN] Publicering misslyckades: ${error.message}`);
+        })
+        .finally(() => { job.finishedAt = new Date().toISOString(); });
+    res.status(202).json({ success: true, jobId: id });
+});
+
+app.get('/terrain/publish/status/:id', (req, res) => {
+    const job = publicationJobs.get(req.params.id);
+    if (!job) return res.status(404).json({ success: false, error: 'Publiceringsjobb hittades inte.' });
+    res.json({ success: true, ...job });
+});
+
+app.get('/terrain/:catalog', (req, res) => {
+    const catalogs = loadPublishedCatalogs();
+    const catalog = catalogs[normalizeCatalogAlias(req.params.catalog)];
+    if (!catalog) {
+        return res.status(404).json({ success: false, error: 'Katalog hittades inte' });
+    }
+
+    const config = buildCatalogConfig(req, catalog);
+    res.json({ success: true, catalog: config });
+});
+
+app.get('/terrain/:catalog/config/:kind', (req, res) => {
+    const catalogs = loadPublishedCatalogs();
+    const catalog = catalogs[normalizeCatalogAlias(req.params.catalog)];
+    if (!catalog) {
+        return res.status(404).json({ success: false, error: 'Katalog hittades inte' });
+    }
+
+    const config = buildCatalogConfig(req, catalog);
+    const kind = req.params.kind && req.params.kind.toLowerCase();
+    if (kind === 'hajk') {
+        return res.json({
+            id: catalog.alias,
+            name: catalog.title,
+            title: catalog.title,
+            visible: true,
+            opacity: 0.8,
+            type: 'tile',
+            source: {
+                type: 'tile',
+                url: catalog.isPublic === false ? `${config.tileUrl}?api_key=<API-KEY>` : config.tileUrl,
+                maxZoom: config.maxZoom,
+                attribution: 'LMV / MGIS-Downloader'
+            }
+        });
+    }
+    if (kind === 'origo') {
+        return res.json({
+            id: catalog.alias,
+            title: catalog.title,
+            visible: true,
+            opacity: 0.8,
+            source: {
+                type: 'xyz',
+                url: catalog.isPublic === false ? `${config.tileUrl}?api_key=<API-KEY>` : config.tileUrl,
+                maxZoom: config.maxZoom
+            }
+        });
+    }
+
+    res.status(400).json({ success: false, error: 'Okänt format. Använd hajk eller origo.' });
+});
+
+app.get('/terrain/:catalog/tiles/:z/:x/:y.png', async (req, res, next) => {
+    const catalog = loadPublishedCatalogs()[normalizeCatalogAlias(req.params.catalog)];
+    if (!catalog) return res.sendStatus(404);
+    const nativeZoom = catalog.generated && Number(catalog.generated.maxZoom);
+    const zoom = Number(req.params.z);
+    if (!Number.isSafeInteger(nativeZoom) || zoom <= nativeZoom) return next();
+    try {
+        const tile = await overzoomTile(catalog.publicFolder, nativeZoom, zoom, Number(req.params.x), Number(req.params.y));
+        if (!tile) return res.sendStatus(404);
+        res.setHeader('Cache-Control', catalog.isPublic === false ? 'private, max-age=3600' : 'public, max-age=3600');
+        res.type('png').send(tile);
+    } catch (error) {
+        writeToLog(`[TERRAIN] Tile-fel: ${error.message}`);
+        res.sendStatus(500);
+    }
+});
+
+app.get('/terrain/:catalog/*path', (req, res, next) => {
+    const catalogs = loadPublishedCatalogs();
+    const alias = normalizeCatalogAlias(req.params.catalog);
+    const catalog = catalogs[alias];
+    if (!catalog) {
+        return next();
+    }
+
+    const folderPath = catalog.publicFolder ? catalog.publicFolder : path.join(__dirname, catalog.folderName || 'terrain');
+    const raw = req.params.path || [];
+    if (!raw.length) {
+        return res.status(404).json({ success: false, error: 'Fil eller resurs saknas' });
+    }
+
+    try {
+        const relative = (Array.isArray(raw) ? raw : raw.split(/[\\/]+/)).filter(Boolean).join(path.sep);
+        const fullPath = safeJoinWithinBase(folderPath, relative);
+        if (!fs.existsSync(fullPath)) {
+            return res.status(404).json({ success: false, error: 'Resurs hittades inte i katalogen' });
+        }
+        res.sendFile(fullPath);
+    } catch (error) {
+        res.status(403).json({ success: false, error: 'Otillåten access till katalogfil' });
+    }
+});
+
+app.delete('/terrain/:catalog', (req, res) => {
+    const alias = normalizeCatalogAlias(req.params.catalog);
+    const catalogs = loadPublishedCatalogs();
+    if (!catalogs[alias]) {
+        return res.status(404).json({ success: false, error: 'Katalog hittades inte' });
+    }
+    if (activePublications.has(alias)) return res.status(409).json({ success: false, error: 'Publicering pågår.' });
+    try {
+        removePublishedCatalogs(catalogs, [alias]);
+        res.json({ success: true, message: 'Katalog och publicerade filer togs bort' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
+    if (req.authUser.role !== 'admin') return res.status(403).json({ success: false, error: 'Endast administratörer får ta bort nedladdningar.' });
     const folderName = req.params.folderName;
-    if (!folderName.startsWith('LMV_DOWNLOADS_')) {
+    if (!/^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(folderName)) {
         return res.status(400).json({ success: false, error: 'Ogiltigt mappnamn' });
     }
     
@@ -1451,8 +2063,14 @@ app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
     if (jobUsingFolder(folderName)) {
         return res.status(409).json({ success: false, error: 'Mappen används av en pågående nedladdning. Stoppa jobbet först.' });
     }
+    if ([...publicationJobs.values()].some(job => job.folderName === folderName && job.status === 'running')) {
+        return res.status(409).json({ success: false, error: 'Mappen publiceras. Vänta tills publiceringen är klar.' });
+    }
     
     try {
+        const catalogs = loadPublishedCatalogs();
+        const aliases = Object.keys(catalogs).filter(alias => catalogs[alias].folderName === folderName);
+        if (aliases.length) removePublishedCatalogs(catalogs, aliases);
         fs.rmSync(folderPath, { recursive: true, force: true });
         writeToLog(`[DELETE] Mapp raderad: ${folderName}`);
         res.json({ success: true, message: 'Mappen raderades' });
@@ -1461,7 +2079,7 @@ app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
     }
 });
 
-app.listen(port, () => {
+app.listen(port, process.env.HOST || '127.0.0.1', () => {
     console.log(`Servern körs på http://localhost:${port}`);
     console.log(`- Vektor:    http://localhost:${port}/lmv.html`);
     console.log(`- Höjd:      http://localhost:${port}/lmv_hojd.html`);
@@ -1486,4 +2104,22 @@ app.post('/lmv/validate', async (req, res) => {
         writeToLog(`[VALIDATE-ENDPOINT] Fel vid validering: ${e.message}`);
         return res.status(502).json({ success: false, error: 'Fel vid kontakt med LMV API. Försök senare.' });
     }
+});
+
+app.patch('/terrain/:catalog/access', (req, res) => {
+    const alias = normalizeCatalogAlias(req.params.catalog);
+    const catalogs = loadPublishedCatalogs();
+    const catalog = catalogs[alias];
+    if (!catalog) return res.status(404).json({ error: 'Catalog not found' });
+    if (activePublications.has(alias)) return res.status(409).json({ error: 'Publication in progress' });
+    const { isPublic, rotateKey } = req.body || {};
+    if (typeof isPublic !== 'boolean' || (rotateKey !== undefined && typeof rotateKey !== 'boolean')) return res.status(400).json({ error: 'Invalid access settings' });
+    const changedToPrivate = catalog.isPublic !== false && !isPublic;
+    const generated = !isPublic && (changedToPrivate || rotateKey || !catalog.apiKeyHash) ? newServiceKey() : null;
+    catalog.isPublic = isPublic;
+    if (generated) catalog.apiKeyHash = generated.hash;
+    catalog.updatedAt = new Date().toISOString();
+    savePublishedCatalogs(catalogs);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, isPublic, ...(generated && { apiKey: generated.key }) });
 });

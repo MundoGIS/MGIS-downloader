@@ -14,6 +14,7 @@ let minLonInput, maxLonInput, minLatInput, maxLatInput;
 // Variables de estado
 let currentCollectionId = null;
 let currentWKTGeometry = null;
+let uploadedGeometryActive = false;
 let currentApiKey = null;
 let currentItemsCount = 0;
 
@@ -44,6 +45,7 @@ function initializeMap() {
 
     // --- Eventos del mapa ---
     map.on(L.Draw.Event.CREATED, function (event) {
+        uploadedGeometryActive = false;
         const layer = event.layer;
         const bounds = layer.getBounds();
         const southWest = bounds.getSouthWest(); const northEast = bounds.getNorthEast();
@@ -72,6 +74,7 @@ function initializeMap() {
     });
 
     map.on(L.Draw.Event.DELETED, function() {
+        uploadedGeometryActive = false;
         currentWKTGeometry = null;
         minLonInput.value = ''; maxLonInput.value = '';
         minLatInput.value = ''; maxLatInput.value = '';
@@ -80,6 +83,7 @@ function initializeMap() {
     });
 
     map.on(L.Draw.Event.EDITED, function (event) {
+        uploadedGeometryActive = false;
         event.layers.eachLayer(function (layer) {
             const bounds = layer.getBounds();
             const southWest = bounds.getSouthWest(); const northEast = bounds.getNorthEast();
@@ -135,6 +139,117 @@ function validateAndGetWKTFromInputs() {
     };
     console.log("GeoJSON generado desde coordenadas:", JSON.stringify(geoJson));
     return geoJson;
+}
+
+function parseGeoJsonCrsName(rawCrs) {
+    if (!rawCrs) return 'EPSG:4326';
+    if (typeof rawCrs === 'string') {
+        const normalized = rawCrs.trim().replace(/^urn:ogc:def:crs:epsg::/i, 'EPSG:').replace(/^epsg:/i, 'EPSG:').toUpperCase();
+        if (/^EPSG:\d+$/i.test(normalized)) return normalized;
+        const match = normalized.match(/EPSG[:\s]*(\d+)/i);
+        if (match) return `EPSG:${match[1]}`;
+        return 'EPSG:4326';
+    }
+    if (rawCrs.type === 'name' && rawCrs.properties && rawCrs.properties.name) {
+        return parseGeoJsonCrsName(rawCrs.properties.name);
+    }
+    if (rawCrs.properties && rawCrs.properties.code) {
+        return parseGeoJsonCrsName(rawCrs.properties.code);
+    }
+    return 'EPSG:4326';
+}
+
+function webMercatorToLonLat(x, y) {
+    const lon = (x / 20037508.34) * 180;
+    const lat = (2 * Math.atan(Math.exp((y / 20037508.34) * Math.PI)) - Math.PI / 2) * (180 / Math.PI);
+    return [lon, lat];
+}
+
+function sweref99tmToWgs84(x, y) {
+    const a = 6378137;
+    const f = 1 / 298.257222101;
+    const e2 = 1 - (1 - f) * (1 - f);
+    const ePrime2 = e2 / (1 - e2);
+    const k0 = 0.9996;
+    const x0 = 500000;
+    const x1 = x - x0;
+    const M = y / k0;
+    const mu = M / (a * (1 - e2 / 4 - (3 * e2 * e2) / 64 - (5 * e2 * e2 * e2) / 256));
+    const e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+    const phi1 = mu + ((3 * e1 / 2) - (27 * e1 * e1 * e1 / 32)) * Math.sin(2 * mu) + ((21 * e1 * e1 / 16) - (55 * e1 * e1 * e1 * e1 / 32)) * Math.sin(4 * mu) + ((151 * e1 * e1 * e1 / 96)) * Math.sin(6 * mu);
+    const C1 = ePrime2 * Math.cos(phi1) * Math.cos(phi1);
+    const T1 = Math.tan(phi1) * Math.tan(phi1);
+    const N1 = a / Math.sqrt(1 - e2 * Math.sin(phi1) * Math.sin(phi1));
+    const R1 = a * (1 - e2) / Math.pow(1 - e2 * Math.sin(phi1) * Math.sin(phi1), 1.5);
+    const D = x1 / (N1 * k0);
+    const lat = phi1 - (N1 * Math.tan(phi1) / R1) * ((D * D) / 2 - ((5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ePrime2) * Math.pow(D, 4)) / 24 + ((61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * ePrime2 - 3 * C1 * C1) * Math.pow(D, 6)) / 720);
+    const lon = (15 * Math.PI / 180) + (D - ((1 + 2 * T1 + C1) * Math.pow(D, 3)) / 6 + ((5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ePrime2 + 24 * T1 * T1) * Math.pow(D, 5)) / 120) / Math.cos(phi1);
+    return [lon * (180 / Math.PI), lat * (180 / Math.PI)];
+}
+
+function projectPointToWgs84([x, y], sourceCrs = 'EPSG:4326') {
+    const crs = parseGeoJsonCrsName(sourceCrs);
+    if (crs === 'EPSG:4326') return [x, y];
+    if (crs === 'EPSG:3857') return webMercatorToLonLat(x, y);
+    if (crs === 'EPSG:3006') return sweref99tmToWgs84(x, y);
+    return [x, y];
+}
+
+function transformCoordinateTree(value, sourceCrs = 'EPSG:4326') {
+    if (!Array.isArray(value)) return value;
+    if (value.length >= 2 && typeof value[0] === 'number' && typeof value[1] === 'number') {
+        return projectPointToWgs84([value[0], value[1]], sourceCrs);
+    }
+    return value.map(item => transformCoordinateTree(item, sourceCrs));
+}
+
+function normalizeGeoJsonGeometry(geometry, inheritedCrs = 'EPSG:4326') {
+    if (!geometry || typeof geometry !== 'object') return null;
+
+    const sourceCrs = parseGeoJsonCrsName(geometry.crs || geometry.properties?.crs || inheritedCrs);
+
+    if (geometry.type === 'FeatureCollection') {
+        const features = (geometry.features || []).map(feature => normalizeGeoJsonGeometry(feature, sourceCrs)).filter(Boolean);
+        const polygons = features.flatMap(item => item.type === 'Polygon' ? [item.coordinates] : item.coordinates);
+        if (!polygons.length) return null;
+        return polygons.length === 1
+            ? { type: 'Polygon', coordinates: polygons[0] }
+            : { type: 'MultiPolygon', coordinates: polygons };
+    }
+
+    if (geometry.type === 'Feature') {
+        return normalizeGeoJsonGeometry(geometry.geometry, sourceCrs);
+    }
+
+    if ((geometry.type === 'Polygon' || geometry.type === 'MultiPolygon') && geometry.coordinates) {
+        return {
+            type: geometry.type,
+            coordinates: transformCoordinateTree(geometry.coordinates, sourceCrs)
+        };
+    }
+
+    return null;
+}
+
+function applyGeometryToMap(geometry, label = 'GeoJSON cargado') {
+    if (!geometry || !map || !drawnItems) return null;
+
+    const layer = L.geoJSON(geometry, {
+        style: { color: '#ff6b00', weight: 2, fillOpacity: 0.2 }
+    });
+    const bounds = layer.getBounds();
+    if (!bounds.isValid()) throw new Error('Ogiltig geometri');
+    drawnItems.clearLayers();
+    drawnItems.addLayer(layer);
+    map.fitBounds(bounds.pad(0.2));
+    minLonInput.value = bounds.getWest().toFixed(6);
+    maxLonInput.value = bounds.getEast().toFixed(6);
+    minLatInput.value = bounds.getSouth().toFixed(6);
+    maxLatInput.value = bounds.getNorth().toFixed(6);
+    currentWKTGeometry = geometry;
+    uploadedGeometryActive = true;
+    showMessage(label, 'success');
+    return geometry;
 }
 
 // --- Funciones de Mensajes ---
@@ -194,6 +309,9 @@ document.addEventListener('DOMContentLoaded', function() {
     maxLonInput = document.getElementById('max-lon');
     minLatInput = document.getElementById('min-lat');
     maxLatInput = document.getElementById('max-lat');
+    [minLonInput, maxLonInput, minLatInput, maxLatInput].forEach(input => {
+        input.addEventListener('input', () => { uploadedGeometryActive = false; });
+    });
     
     const fullDownloadBtn = document.getElementById('start-full-download-btn');
     const collectionSelect = document.getElementById('collection-select');
@@ -242,6 +360,28 @@ document.addEventListener('DOMContentLoaded', function() {
     // Llamar al cargar la página
     loadCollections();
 
+    const geoJsonUploadInput = document.getElementById('geojson-upload');
+    if (geoJsonUploadInput) {
+        geoJsonUploadInput.addEventListener('change', async (event) => {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const parsed = JSON.parse(text);
+                const geometry = normalizeGeoJsonGeometry(parsed);
+                if (!geometry) {
+                    throw new Error('GeoJSON inválido');
+                }
+                applyGeometryToMap(geometry, `Área cargada desde ${file.name}`);
+            } catch (error) {
+                console.error('Error al leer GeoJSON:', error);
+                showMessage('El GeoJSON no es válido. Debe incluir un Polygon, MultiPolygon o FeatureCollection válido.', 'error');
+            } finally {
+                event.target.value = '';
+            }
+        });
+    }
+
     collectionSelect.addEventListener('change', () => {
         const sel = collectionSelect.selectedOptions[0];
         const lic = sel ? sel.dataset.license : null;
@@ -283,7 +423,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        let geometry = validateAndGetWKTFromInputs();
+        let geometry = uploadedGeometryActive ? currentWKTGeometry : validateAndGetWKTFromInputs();
         if (!geometry) {
             showMessage('Vänligen rita en rektangel på kartan eller fyll i giltiga koordinater.', 'error');
             disableButtons(false);

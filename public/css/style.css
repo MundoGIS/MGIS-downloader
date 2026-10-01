@@ -33,62 +33,111 @@ body {
 
 /* ===== HEADER NAVIGATION ===== */
 .main-header {
-    background: var(--card-bg);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.07);
-    padding: 15px 4vw;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    width: 100%;
+    background: #fff;
+    border-bottom: 1px solid #d9e5e5;
+    box-shadow: 0 4px 16px rgba(24, 57, 64, 0.06);
     position: sticky;
     top: 0;
     z-index: 10;
 }
 
-.main-header .brand {
-    font-size: 1.3rem;
-    font-weight: 700;
-    color: var(--accent);
+.header-inner {
+    width: 95%;
+    max-width: 1620px;
+    min-height: 76px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(215px, auto) minmax(0, 1fr) auto;
+    gap: 20px;
+    align-items: center;
 }
 
-/* Logo in header */
+body:not(.home-page):not(.downloads-page) .header-inner { max-width: 1152px; }
+
+.main-header .brand {
+    font: 700 1rem/1.2 'Trebuchet MS', sans-serif;
+    color: #183f48;
+    white-space: nowrap;
+}
+
 .main-header .site-logo {
-    height: 70px;
-    width: auto;
-    margin-right: 12px;
+    width: 66px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 4px;
     display: block;
 }
 
-/* Ensure header items align nicely with logo */
-.main-header {
-    align-items: center;
-}
-
-/* Brand + logo wrapper to keep them side-by-side */
 .brand-wrap {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
+    min-width: 0;
 }
 
 .main-header nav {
     display: flex;
-    gap: 15px;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 0;
 }
 
-.main-header nav a {
-    margin-left: 18px;
-    text-decoration: none;
-    color: var(--text);
-    font-weight: 600;
-    padding: 8px 15px;
+.main-header nav a,
+.header-account a,
+.header-account button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 8px 11px;
+    border: 1px solid transparent;
     border-radius: 5px;
-    transition: all 0.3s;
+    background: transparent;
+    color: #3a525a;
+    text-decoration: none;
+    font: 600 0.86rem/1.2 'Trebuchet MS', sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
 }
+
+.main-header nav a:hover,
+.header-account a:hover,
+.header-account button:hover { background: #edf4f4; color: #155a65; }
 
 .main-header nav a.active,
-.main-header nav a:hover {
-    color: var(--accent);
-    background: rgba(52, 152, 219, 0.1);
+.main-header nav a.active:hover {
+    color: #08645c;
+    background: #ddf0eb;
+}
+
+.main-header nav a.active {
+    color: #08645c;
+    background: #e5f4ef;
+    border-color: #c7e3d8;
+}
+
+.header-account {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    border-left: 1px solid #d9e5e5;
+    padding-left: 14px;
+    min-width: 0;
+}
+
+.header-account button { width: auto; flex: none; margin: 0; }
+
+.header-account .account-name {
+    font: 600 0.8rem/1.2 'Trebuchet MS', sans-serif;
+    color: #587077;
+    flex: none;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* ===== CONTAINER ===== */
@@ -719,6 +768,8 @@ body.downloads-page {
 }
 
 .downloads-page .container {
+    width: 100%;
+    box-sizing: border-box;
     max-width: 1200px;
     margin: 0 auto;
     padding: 0;
@@ -726,28 +777,13 @@ body.downloads-page {
 }
 
 .downloads-page .main-header {
-    background: var(--gradient-primary);
-    padding: 15px 30px;
+    background: #fff;
+    margin-bottom: 18px;
 }
 
-.downloads-page .main-header .brand {
-    color: white;
-    font-size: 1.5em;
-}
-
-.downloads-page .main-header nav a {
-    color: white;
-    padding: 8px 15px;
-    border-radius: 5px;
-    transition: background 0.3s;
-}
-
-.downloads-page .main-header nav a:hover {
-    background: rgba(255,255,255,0.1);
-}
-
-.downloads-page .main-header nav a.active {
-    background: rgba(255,255,255,0.2);
+.downloads-page .header-inner {
+    width: 100%;
+    max-width: 1200px;
 }
 
 .header {
@@ -761,6 +797,7 @@ body.downloads-page {
     margin: 0 0 10px 0;
     font-size: 2em;
     color: white;
+    overflow-wrap: anywhere;
 }
 
 .header p {
@@ -1014,16 +1051,21 @@ body.downloads-page {
 }
 
 /* ===== RESPONSIVE DESIGN ===== */
+@media (max-width: 1150px) {
+    .header-inner { grid-template-columns: 1fr auto; gap: 4px 12px; padding: 10px 0; }
+    .main-header nav { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; overflow-x: auto; padding: 5px 0 2px; }
+    .header-account { grid-column: 2; grid-row: 1; }
+}
+
 @media (max-width: 768px) {
-    .main-header {
-        flex-direction: column;
-        gap: 15px;
-    }
-    
-    .main-header nav {
-        flex-wrap: wrap;
-        justify-content: center;
-    }
+    .downloads-page .header { padding: 20px 12px; }
+    .downloads-page .header h1 { font-size: 1.45em; }
+    .header-inner { width: calc(100% - 24px); }
+    .main-header .brand { display: none; }
+    .main-header .site-logo { width: 48px; height: 36px; }
+    .header-account .account-name { display: none; }
+    .main-header nav { justify-content: center; flex-wrap: wrap; overflow: visible; gap: 4px; }
+    .main-header nav a { padding: 7px 9px; font-size: 0.8rem; }
     
     .hero h1 {
         font-size: 2em;
@@ -1079,4 +1121,85 @@ body.downloads-page {
 }
 
 .auth-row { display:flex; gap:16px; align-items:flex-start; }
-.auth-col { flex:1; }
+.auth-col { flex: 1; min-width: 0; }
+
+@media (max-width: 768px) {
+    .auth-row { flex-direction: column; }
+    .auth-col { width: 100%; }
+    .credential-warning { overflow-wrap: anywhere; }
+}
+
+/* Download job status */
+.downloads-page .jobs-section { margin-bottom: 30px; }
+.downloads-page .jobs-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.downloads-page .jobs-section-header h2 { font-size: 1.2em; color: #333; margin: 0; }
+.downloads-page .job-card { border: 1px solid #dee2e6; border-left: 5px solid #667eea; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; background: #fff; }
+.downloads-page .job-card.status-stopping { border-left-color: #fd7e14; }
+.downloads-page .job-card.status-done { border-left-color: #28a745; }
+.downloads-page .job-card.status-cancelled { border-left-color: #6c757d; }
+.downloads-page .job-card.status-failed { border-left-color: #dc3545; }
+.downloads-page .job-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.downloads-page .job-title { font-weight: 600; color: #333; }
+.downloads-page .job-sub { font-size: 0.85em; color: #6c757d; margin-top: 2px; }
+.downloads-page .job-status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85em; font-weight: 600; padding: 3px 10px; border-radius: 12px; }
+.downloads-page .job-status.running { background: #e8eaff; color: #3f4bb8; }
+.downloads-page .job-status.stopping { background: #fff3e0; color: #b35900; }
+.downloads-page .job-status.done { background: #d4edda; color: #155724; }
+.downloads-page .job-status.cancelled { background: #e9ecef; color: #495057; }
+.downloads-page .job-status.failed { background: #f8d7da; color: #721c24; }
+.downloads-page .mini-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(0,0,0,0.15); border-top-color: currentColor; border-radius: 50%; animation: spin 0.9s linear infinite; }
+.downloads-page .job-progress { margin-top: 10px; }
+.downloads-page .job-bar { height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; }
+.downloads-page .job-bar-fill { height: 100%; background: #667eea; transition: width 0.4s; }
+.downloads-page .job-bar-fill.indeterminate { width: 30% !important; animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+.downloads-page .job-detail { font-size: 0.85em; color: #555; margin-top: 6px; }
+.downloads-page .job-message { margin-top: 8px; font-size: 0.95em; }
+.downloads-page .badge-running { background: #e8eaff; color: #3f4bb8; display: inline-flex; align-items: center; gap: 5px; }
+.downloads-page .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.downloads-page .btn.publish-pending:disabled { background: #757d85; border-color: #757d85; color: #fff; opacity: 1; cursor: not-allowed; }
+.downloads-page #toast { position: fixed; right: 20px; bottom: 20px; max-width: 460px; z-index: 9999; display: none; padding: 14px 18px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.2); color: #fff; font-size: 0.95em; }
+.downloads-page #toast.done { background: #28a745; }
+.downloads-page #toast.cancelled { background: #6c757d; }
+.downloads-page #toast.failed { background: #dc3545; }
+.downloads-page #toast .toast-close { float: right; margin-left: 12px; cursor: pointer; font-weight: bold; }
+
+/* Login */
+body.login-page { display: grid; place-items: center; background: #edf2f3; color: #193332; font: 16px/1.5 'Trebuchet MS', sans-serif; }
+.login-page main { width: min(calc(100% - 36px), 390px); padding: 32px; background: #fff; border: 1px solid #cbd8d8; border-top: 5px solid #15766a; border-radius: 6px; box-shadow: 0 12px 30px #183c3420; }
+.login-page h1 { margin: 0 0 22px; font-size: 24px; }
+.login-page label { display: block; font-weight: 600; margin: 14px 0 5px; }
+.login-page input:not([type="checkbox"]) { width: 100%; padding: 11px; font: inherit; border: 1px solid #9bafac; border-radius: 4px; }
+.login-page .password-field { position: relative; }
+.login-page .password-field input { padding-right: 52px; }
+.login-page .password-field button { position: absolute; right: 2px; top: 2px; width: 42px; height: 40px; padding: 8px; margin: 0; background: transparent; color: #193332; display: grid; place-items: center; }
+.login-page .remember { display: flex; align-items: center; gap: 9px; font-weight: 400; margin-top: 18px; }
+.login-page button[type="submit"] { margin-top: 24px; padding: 11px 16px; width: 100%; background: #15766a; border: 0; color: #fff; border-radius: 4px; font: inherit; font-weight: 700; cursor: pointer; }
+.login-page button:disabled { opacity: .6; cursor: wait; }
+.login-page #error { min-height: 1.5em; color: #a32826; }
+.login-page #setup { display: none; margin: 16px 0; padding: 12px; background: #e8f2ef; border-left: 3px solid #15766a; }
+.login-page #setup code { overflow-wrap: anywhere; }
+
+/* User administration */
+body.admin-page { background: #edf2f3; color: #193332; font: 16px/1.5 'Trebuchet MS', sans-serif; }
+.admin-page main { max-width: 860px; margin: 32px auto; padding: 0 20px; }
+.admin-page h1 { font-size: 26px; }
+.admin-page main a { color: #09685d; }
+.admin-page main section { background: #fff; border: 1px solid #cbd8d8; padding: 20px; margin: 20px 0; border-radius: 6px; }
+.admin-page form, .admin-page .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.admin-page main label { display: grid; gap: 5px; font-weight: 600; flex: 1 1 170px; }
+.admin-page main input, .admin-page main select { width: 100%; padding: 9px; border: 1px solid #9bafac; border-radius: 4px; font: inherit; }
+.admin-page main button { padding: 9px 12px; border: 0; border-radius: 4px; font: inherit; cursor: pointer; background: #147769; color: white; }
+.admin-page main button.delete { background: #b13331; }
+.admin-page main li { list-style: none; border-bottom: 1px solid #ddd; padding: 12px 0; }
+.admin-page main ul { margin: 0; padding: 0; }
+.admin-page #message { min-height: 1.5em; }
+
+/* Help */
+.help-page .help-container { max-width: 980px; margin: 0 auto; }
+.help-page .tab-content { padding-top: 1rem; }
+.help-page .note { background: #f5f7ff; padding: 15px; border-left: 4px solid #3273dc; margin-bottom: 1.5rem; }
+.help-page .step-box { margin-bottom: 1.5rem; }
+.help-page .api-url-box { background: #f0f0f0; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.9rem; border: 1px solid #ddd; margin-top: 5px; display: flex; justify-content: space-between; align-items: center; }
+.help-page .browser-link { font-size: 0.75rem; font-weight: bold; text-transform: uppercase; margin-left: 10px; }
+.help-page strong { color: #363636; }

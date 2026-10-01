@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Användare | MGIS</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="admin-page">
+    <div id="site-header"></div>
+    <main>
+        <h1>Användare</h1>
+        <section>
+            <h2>Skapa användare</h2>
+            <form id="create">
+                <label>Användarnamn<input name="username" required pattern="[a-zA-Z0-9._-]{3,40}" autocomplete="off"></label>
+                <label>Lösenord<input name="password" type="password" required minlength="6" autocomplete="new-password"></label>
+                <label>Roll<select name="role"><option value="user">Användare</option><option value="admin">Admin</option></select></label>
+                <button type="submit">Skapa</button>
+            </form>
+        </section>
+        <section><h2>Konton</h2><ul id="users"></ul></section>
+        <p id="message" role="status"></p>
+    </main>
+    <script>
+        const message = document.getElementById('message');
+        async function request(url, options) {
+            const response = await fetch(url, options);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Begäran misslyckades');
+            return data;
+        }
+        async function loadUsers() {
+            try {
+                const data = await request('/admin/users');
+                const list = document.getElementById('users');
+                list.replaceChildren();
+                for (const user of data.users) {
+                    const item = document.createElement('li');
+                    const row = document.createElement('div');
+                    row.className = 'row';
+                    const name = document.createElement('strong');
+                    name.textContent = user.username;
+                    const role = document.createElement('select');
+                    for (const value of ['user', 'admin']) {
+                        const option = document.createElement('option'); option.value = value; option.textContent = value; role.append(option);
+                    }
+                    role.value = user.role;
+                    role.title = 'Roll';
+                    role.style.width = '110px';
+                    role.addEventListener('change', () => changeUser(user.id, { role: role.value }));
+                    const rename = document.createElement('button'); rename.textContent = 'Byt namn';
+                    rename.addEventListener('click', () => { const username = prompt('Nytt användarnamn (3-40 tecken):', user.username); if (username && username !== user.username) changeUser(user.id, { username }); });
+                    const reset = document.createElement('button'); reset.textContent = 'Byt lösenord';
+                    reset.addEventListener('click', () => { const password = prompt('Nytt lösenord (minst 6 tecken):'); if (password) changeUser(user.id, { password }); });
+                    const remove = document.createElement('button'); remove.className = 'delete'; remove.textContent = 'Ta bort';
+                    remove.addEventListener('click', async () => { if (!confirm(`Ta bort ${user.username}?`)) return; try { await request(`/admin/users/${encodeURIComponent(user.id)}`, { method: 'DELETE' }); message.textContent = 'Kontot togs bort.'; await loadUsers(); } catch (error) { message.textContent = error.message; } });
+                    row.append(name, role, rename, reset, remove); item.append(row); list.append(item);
+                }
+            } catch (error) { message.textContent = error.message; }
+        }
+        async function changeUser(id, changes) {
+            try { await request(`/admin/users/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); message.textContent = 'Kontot uppdaterades.'; }
+            catch (error) { message.textContent = error.message; }
+            await loadUsers();
+        }
+        document.getElementById('create').addEventListener('submit', async event => {
+            event.preventDefault();
+            const form = event.target;
+            try {
+                await request('/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: form.elements.username.value, password: form.elements.password.value, role: form.elements.role.value }) });
+                form.reset(); message.textContent = 'Kontot skapades.'; await loadUsers();
+            } catch (error) { message.textContent = error.message; }
+        });
+        loadUsers();
+    </script>
+    <script src="auth-nav.js" defer></script>
+</body>
+</html>

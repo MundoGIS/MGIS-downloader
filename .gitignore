@@ -21,6 +21,19 @@ process.log
 
 # Environment files
 .env
+.env.*
+!.env.example
+data/users.json
+data/users.json.*.tmp
+data/remembered_sessions.json
+data/remembered_sessions.json.*.tmp
+terrain_catalogs.json
+terrain/
+data/po.geojson
+data/po2.qmd
+data/po.qmd
+data/po2.geojson
+
 
 
 # OS files
