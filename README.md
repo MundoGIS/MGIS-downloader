@@ -1,3 +1,12 @@
+1. Vänta tills nedladdningsjobbet är **klart**. Öppna **Nedladdningar** och välj *Upplösning XYZ*: *Original* eller 10/20/50/100 m. Detta begränsar detaljzoom som beräknas; högre zoomnivåer förstoras från föregående nivå. Välj *Ljusvinkel* 15–80° (standard 35) och *Reliefstyrka* 0,5–3 (standard 1,7). Mappar med TIFF/COG eller VRT kan publiceras.
+3. För QGIS välj **XYZ Tiles > New Connection** och klistra in enbart URL:en från **Kopiera länk** (inte CSS, HTML eller WMS). Om QGIS körs på en annan dator ska `localhost` ersättas med serverns nåbara värdnamn/IP; privata kataloger accepterar API-nyckeln som query-parameter i URL:en. Första anropet renderar en tile ur källan och cachar PNG:n. När en ny höjdområdesnedladdning är klar uppdateras samma katalog till samlingens nya `index.vrt` och den gamla servercachen ogiltigförklaras; kartklienten behöver inte en ny XYZ-datakälla.
+
+VRT-sökvägen visas separat i katalogkortet och kan kopieras för att öppna VRT direkt i QGIS **på serverdatorn**. Den är en lokal filsökväg vars käll-TIFF:er ligger på serverns disk; den ska inte användas som URL i en QGIS-klient på en annan dator. För fjärrklienter använd XYZ-länken.
+3. Kopiera URL:en `/terrain/<alias>/tiles/{z}/{x}/{y}.png` till en **XYZ-kapabel** kartklient (t.ex. Hajk, Origo eller QGIS XYZ Tiles). Första anropet renderar en tile ur källan och cachar PNG:n; efterföljande anrop använder disken. Rendering sker i en begränsad kö. När en ny höjdområdesnedladdning är klar uppdateras samma katalog till samlingens nya `index.vrt` och den gamla servercachen ogiltigförklaras; Hajk/Origo/QGIS behöver alltså inte en ny XYZ-datakälla. Zoomnivåerna finns till och med 22, men ger inte mer detalj än källrastret. Tjänsten är inte WMS/WMTS.
+generera PNG XYZ-tiles först när de efterfrågas. Beräkningen reprojicerar en liten källruta till EPSG:3857 och gör hillshade (justerbar ljusvinkel och reliefstyrka); färdiga tiles sparas i en storleksbegränsad diskcache. Källfilerna lämnas orörda.
+generera PNG XYZ-tiles först när de efterfrågas. Beräkningen reprojicerar en liten källruta till EPSG:3857 och gör hillshade (justerbar ljusvinkel och reliefstyrka); färdiga tiles sparas i en storleksbegränsad diskkassa. Källfilerna lämnas orörda.
+Diskutrymme för nedladdade TIFF/COG och en tile-cache (standard högst 20 GB per katalog); ingen full XYZ-pyramid skapas vid publicering.
+registrera TIFF/COG eller befintligt VRT och generera PNG XYZ-tiles först när de efterfrågas. Beräkningen reprojicerar en liten källruta till EPSG:3857 och gör hillshade (justerbar ljusvinkel och reliefstyrka); färdiga tiles sparas i en storleksbegränsad diskkcache. Källfilerna lämnas orörda.
 
 <!--
 This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
@@ -15,7 +24,10 @@ MGIS-Downloader är en Node.js-app för att hämta svenska geodata och publicera
 - **Lantmäteriet STAC:** hämta vektor- och höjddata med systemkonto/API-nyckel eller Bearer-token. Välj samling och område via Leaflet, rektangel, polygon, län eller uppladdad GeoJSON-fil med flera polygoner. Uppladdade polygoner finns i webbläsarens minne under sessionen; EPSG:4326, EPSG:3857 och EPSG:3006 hanteras för områdesvalet. Okända/omärkta CRS ska inte förutsättas fungera.
 - **Nedladdningsjobb:** live-status, avbryt, återanvänd redan hämtade filer, bearbeta höjdraster, skapa VRT/tile-index och hämta färdiga mappar som ZIP. `LMV_DOWNLOADS_*` innehåller källmaterialet.
 - **Terrängpublicering:** välj *Original* eller 10/20/50/100 m när nedladdningen är klar. GDAL sammanfogar, transformerar till EPSG:3857, beräknar hillshade (justerbar ljusvinkel och reliefstyrka) och skapar PNG XYZ-tiles. Namnge katalogen själv, följ publiceringsstatus och publicera om med annan stil. Källfilerna lämnas orörda.
-- **Kartklienter:** kopiera XYZ-URL för t.ex. Hajk, Origo och QGIS XYZ Tiles. Nivåer över det lagrade rasterzoomsteget upp till zoom 22 förstoras vid anrop: kartan fortsätter visas men får **inte** mer terrängdetalj än källrastret.
+- **Terrängpublicering:** registrera TIFF/COG eller befintligt VRT och generera PNG XYZ-tiles först när de efterfrågas. Beräkningen reprojicerar en liten källruta till EPSG:3857 och gör hillshade (justerbar ljusvinkel och reliefstyrka); färdiga tiles sparas i en begränsad diskkö. Källfilerna lämnas orörda.
+- **Kartklienter:** kopiera XYZ-URL för t.ex. Hajk, Origo och QGIS XYZ Tiles. XYZ skapas vid behov till zoom 22; zoomnivån styr detaljen som läses ur källrastret och skapar inte ny information.
+- **QGIS med GDAL på samma dator som Node** för det verifierade Windows-flödet. IIS, Hajk, Origo och QGIS som *kartklient* kan nås på andra datorer, men GIS-verktygen måste finnas lokalt hos appen. Rasterpublicering använder `gdalbuildvrt`, `gdalinfo`, `gdalwarp` och `gdaldem`; nedladdningsflödet använder även `gdal_translate` och kan använda Python-verktyg som `gdal_merge.py`.
+Installera Node.js 18+ och QGIS **på samma server**. Anteckna katalogerna för `apps/gdal` och `bin` (QGIS-installationskatalog kan skilja sig). Klona projektet och installera npm-beroenden:
 - **Åtkomst:** lokala konton med admin- och användarroll, privat/public-läge per kartkatalog, engångsvisad API-nyckel för privata tiles, nyckelrotation samt avpublicering. Endast admin får administrera konton och radera nedladdningsmappar; radering av mapp tar också bort tillhörande publicerade kataloger.
 
 ## Krav
@@ -45,8 +57,6 @@ Installations- och publiceringsflödet nedan är verifierat med **Windows + QGIS
 	GDAL=C:/QGIS_344/apps/gdal
 	QGIS=C:/QGIS_344/bin
 	# Sätt bara dessa om automatisk sökväg inte stämmer:
-	# GDAL_TILES_PYTHON=C:/QGIS_344/apps/Python312/python.exe
-	# GDAL_TILES_SCRIPT=C:/QGIS_344/apps/Python312/Scripts/gdal2tiles.py
 	```
 
 	`HOST=127.0.0.1` binder Node lokalt; exponera inte port 3004 direkt på internet. Programmet kontrollerar nödvändiga GDAL-binärer vid start och vid publicering. Anpassa sökvägarna till **din** QGIS-installation. `.env` ska inte versionshanteras.
@@ -74,8 +84,12 @@ IIS på samma maskin terminerar TLS och proxar med **URL Rewrite + Application R
 ## Publicera höjddata
 
 1. Vänta tills nedladdningsjobbet är **klart**. Öppna **Nedladdningar** och välj *Original* (GDAL väljer pixelstorlek) eller 10, 20, 50 eller 100 m. Välj *Ljusvinkel* 15–80° (standard 35) och *Reliefstyrka* 0,5–3 (standard 1,7). Lägre ljusvinkel och högre reliefstyrka ger mörkare/tydligare skuggor.
-2. Klicka **Publicera karttiles**, ange katalogalias och följ statusen i samma nedladdningskort. Appen bygger VRT, reprojicerar höjddata med `gdalwarp` till EPSG:3857, genererar hillshade med `gdaldem` och bygger PNG XYZ med `gdal2tiles.py`. Alias, upplösning och stil lagras i katalogmetadata. Vid ändring av stil väljer du **Publicera om**; först när jobbet är klart byts den publicerade katalogen. Undvik samtidigt arbete mot samma källmapp.
-3. Kopiera URL:en `/terrain/<alias>/tiles/{z}/{x}/{y}.png` till en **XYZ-kapabel** kartklient (t.ex. Hajk, Origo eller QGIS XYZ Tiles). Klienten måste vara konfigurerad för önskat zoomintervall. Ovanför den lagrade pyramidens ursprungliga maxzoom levererar servern förstorat/croppat material till och med zoom 22; det fungerar även vid ungefär 1:500, men skapar **inte** ny rasterdetalj. Tjänsten är inte WMS/WMTS.
+1. Vänta tills nedladdningsjobbet är **klart**. Öppna **Nedladdningar** och välj *Ljusvinkel* 15–80° (standard 35) och *Reliefstyrka* 0,5–3 (standard 1,7). Lägre ljusvinkel och högre reliefstyrka ger mörkare/tydligare skuggor. Mappar med TIFF/COG eller VRT kan publiceras.
+2. Klicka **Publicera XYZ**, ange katalogalias och följ statusen i samma nedladdningskort. Publicering bygger bara ett VRT-index för TIFF-filer eller registrerar ett VRT som redan finns; inget stort raster omprojiceras och inga pyramider byggs i förväg. Vid ändring av stil väljer du **Publicera om**. Undvik samtidigt arbete mot samma källmapp.
+3. Kopiera URL:en `/terrain/<alias>/tiles/{z}/{x}/{y}.png` till en **XYZ-kapabel** kartklient (t.ex. Hajk, Origo eller QGIS XYZ Tiles). Första anropet renderar en tile ur källan och cachar PNG:n; efterföljande anrop använder disken. Rendering sker i en begränsad kö. Zoomnivåerna finns till och med 22, men ger inte mer detalj än källrastret. Tjänsten är inte WMS/WMTS.
+
+Cache och samtidighet kan ställas in i `.env`: `ON_DEMAND_TILE_CONCURRENCY` (standard 2), `ON_DEMAND_TILE_QUEUE` (64 väntande tiles) och `TERRAIN_CACHE_MAX_GB` (20 GB per katalog). Cache ligger separat från publicerade resurser och tas bort vid avpublicering. En tile som inte finns i cache måste räknas om efter omstart endast om cachen har rensats.
+Nedladdade original ligger under `LMV_DOWNLOADS_*`, metadata för publicering under `terrain/`, VRT-indices som appen skapar under `terrain-sources/`, tile-cachar under `terrain-cache/`, katalogindex i `terrain_catalogs.json` och konton/sessioner i `data/users.json`/`data/remembered_sessions.json`. Dessa driftsfiler ska hanteras som lokalt data, inte som källkod; skydda åtkomsten och säkerhetskopiera det som ska bevaras.
 
 Nya kataloger är **privata** som standard. I katalogkortet kan du slå på **Public** för anonym läsning av XYZ-tiles eller använda en unik API-nyckel för privat läsning (`X-API-Key` eller `?api_key=...` i klientens HTTPS-URL). Nyckeln visas bara vid skapande/rotation, servern lagrar bara SHA-256-hash. Spara länken säkert; rotering upphäver gamla nycklar direkt. Nycklar i URL kan hamna i IIS-loggar och klientkonfiguration. Äldre kataloger utan åtkomstflagga förblir publika tills de ändras. **Avpublicera** raderar publicerade tiles men behåller nedladdningen; admin-knappen **Ta bort** raderar källmappen och dess tillhörande publicerade kataloger. Åtkomstkontroll för dessa åtgärder sker även i servern.
 

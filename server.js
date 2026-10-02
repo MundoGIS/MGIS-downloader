@@ -18,6 +18,7 @@ const { randomUUID, randomBytes, createHash } = require('crypto');
 const archiver = require('archiver');
 const { installAuth } = require('./auth');
 const { MAX_ZOOM, overzoomTile } = require('./terrain-tiles');
+const { createTerrainTileRenderer, maxZoomForResolution, overzoomRenderedTile } = require('./terrain-renderer');
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3004;
 const LAN_GEOJSON_PATH = path.join(__dirname, 'data', 'lan.geojson');
@@ -26,6 +27,8 @@ const jobs = new Map();
 const FINISHED_JOB_TTL_MS = 12 * 60 * 60 * 1000;
 const TERRAIN_CATALOGS_FILE = path.join(__dirname, 'terrain_catalogs.json');
 const TERRAIN_PUBLIC_ROOT = path.join(__dirname, 'terrain');
+const TERRAIN_SOURCE_ROOT = path.join(__dirname, 'terrain-sources');
+const TERRAIN_CACHE_ROOT = path.join(__dirname, 'terrain-cache');
 const DEFAULT_TERRAIN_RESOLUTION = 10;
 const ALLOWED_TERRAIN_RESOLUTIONS = new Set([10, 20, 50, 100]);
 const activePublications = new Set();
@@ -40,6 +43,8 @@ const downloadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standar
 function ensureTerrainCatalogStore() {
     try {
         fs.mkdirSync(TERRAIN_PUBLIC_ROOT, { recursive: true });
+        fs.mkdirSync(TERRAIN_SOURCE_ROOT, { recursive: true });
+        fs.mkdirSync(TERRAIN_CACHE_ROOT, { recursive: true });
     } catch (e) {
         console.warn('[TERRAIN] Kunde inte skapa katalogroot:', e.message);
     }
@@ -96,7 +101,9 @@ function removePublishedCatalogs(catalogs, aliases) {
         return { alias, output };
     });
     for (const { alias, output } of outputs) {
+        const entry = catalogs[alias];
         fs.rmSync(output, { recursive: true, force: true });
+        removeCatalogGeneratedFiles(entry);
         delete catalogs[alias];
     }
     savePublishedCatalogs(catalogs);
@@ -108,6 +115,17 @@ function safeJoinWithinBase(basePath, ...parts) {
         throw new Error('Ogiltig katalogsökväg');
     }
     return target;
+}
+
+function removeCatalogGeneratedFiles(entry) {
+    const generated = entry.generated || {};
+    if (generated.cacheKey && /^[a-f0-9-]{36}$/i.test(generated.cacheKey)) {
+        fs.rmSync(path.join(TERRAIN_CACHE_ROOT, generated.cacheKey), { recursive: true, force: true });
+    }
+    if (generated.sourceManaged && generated.sourceRaster) {
+        const source = path.resolve(generated.sourceRaster);
+        if (source.startsWith(TERRAIN_SOURCE_ROOT + path.sep)) fs.rmSync(source, { force: true });
+    }
 }
 
 function runGdalCommand(exePath, args, cwd = null) {
@@ -135,9 +153,7 @@ function validateGdalBinarySet() {
         { name: 'gdalinfo', path: GDAL_GDALINFO_CMD },
         { name: 'gdal_translate', path: GDAL_TRANSLATE_CMD },
         { name: 'gdalwarp', path: GDAL_WARP_CMD },
-        { name: 'gdaldem', path: GDAL_DEM_CMD },
-        { name: 'gdal2tiles Python', path: GDAL_TILES_PYTHON },
-        { name: 'gdal2tiles script', path: GDAL_TILES_SCRIPT }
+        { name: 'gdaldem', path: GDAL_DEM_CMD }
     ];
 
     const missing = required.filter(item => !item.path || !fs.existsSync(item.path));
@@ -150,85 +166,56 @@ function validateGdalBinarySet() {
     return { ok: true, message: 'GDAL OK', missing: [] };
 }
 
-async function detectRasterCrs(rasterPath) {
-    try {
-        const { stdout } = await runGdalCommand(GDAL_GDALINFO_CMD, ['-json', rasterPath]);
-        const info = JSON.parse(stdout);
-        if (info && info.coordinateSystem && info.coordinateSystem.wkt) {
-            return info.coordinateSystem.wkt;
-        }
-        if (info && info.srs) return info.srs;
-        return null;
-    } catch (error) {
-        writeToLog(`[TERRAIN] Kunde inte läsa CRS för ${rasterPath}: ${error.message}`);
-        return null;
-    }
-}
-
-async function publishTerrainRasterFolder(folderName, alias, resolutionMeters, hillshadeStyle = { altitude: 35, strength: 1.7 }) {
+async function publishTerrainRasterFolder(folderName, alias, hillshadeStyle = { altitude: 35, strength: 1.7 }) {
     const sourceRoot = path.join(__dirname, folderName);
-    const publicRoot = path.join(__dirname, 'terrain');
-    fs.mkdirSync(publicRoot, { recursive: true });
-    const outDir = path.join(publicRoot, `${alias}-${Date.now()}`);
+    fs.mkdirSync(TERRAIN_PUBLIC_ROOT, { recursive: true });
+    fs.mkdirSync(TERRAIN_SOURCE_ROOT, { recursive: true });
+    const publicationId = `${alias}-${Date.now()}-${randomUUID()}`;
+    const outDir = path.join(TERRAIN_PUBLIC_ROOT, publicationId);
     fs.mkdirSync(outDir, { recursive: true });
 
-    const rasterFiles = fs.readdirSync(sourceRoot)
-        .filter(file => /\.tiff?$/i.test(file))
-        .sort();
-
-    if (!rasterFiles.length) {
-        throw new Error('Ingen TIFF hittades i nedladdningsmappen.');
-    }
-
+    let sourcePath;
+    let sourceManaged = false;
     try {
-        fs.writeFileSync(path.join(outDir, 'filelist.txt'), rasterFiles.map(file => path.join(sourceRoot, file)).join('\n') + '\n');
-        await runGdalCommand(GDAL_BUILDVRT_CMD, ['-input_file_list', 'filelist.txt', 'source.vrt'], outDir);
-        const warpArgs = [
-            '-t_srs', 'EPSG:3857',
-            '-r', 'average',
-            '-of', 'GTiff',
-            '-co', 'TILED=YES',
-            '-co', 'COMPRESS=DEFLATE',
-            '-co', 'PREDICTOR=2',
-            '-co', 'BIGTIFF=IF_SAFER',
-            'source.vrt', 'terrain_3857.tif'
-        ];
-        if (resolutionMeters !== 'original') warpArgs.splice(2, 0, '-tr', String(resolutionMeters), String(resolutionMeters));
-        await runGdalCommand(GDAL_WARP_CMD, warpArgs, outDir);
-        const { stdout } = await runGdalCommand(GDAL_GDALINFO_CMD, ['-json', 'terrain_3857.tif'], outDir);
-        const pixelSizeMeters = Math.abs(JSON.parse(stdout).geoTransform?.[1]);
-        if (!Number.isFinite(pixelSizeMeters) || pixelSizeMeters <= 0) throw new Error('Kunde inte läsa publicerad rasterupplösning.');
-        await runGdalCommand(GDAL_DEM_CMD, [
-            'hillshade', 'terrain_3857.tif', 'hillshade.tif',
-            '-alt', String(hillshadeStyle.altitude), '-z', String(hillshadeStyle.strength),
-            '-compute_edges', '-of', 'GTiff', '-co', 'COMPRESS=DEFLATE'
-        ], outDir);
-        const maxZoom = Math.max(0, Math.ceil(Math.log2(156543.03392804097 / pixelSizeMeters)));
-        await runGdalCommand(GDAL_TILES_PYTHON, [
-            GDAL_TILES_SCRIPT, '-q', '--xyz', '-p', 'mercator', '-z', `0-${maxZoom}`,
-            '-r', 'bilinear', '-w', 'none', 'hillshade.tif', 'tiles'
-        ], outDir);
-        const tilesRoot = path.join(outDir, 'tiles');
-        if (!fs.existsSync(path.join(tilesRoot, String(maxZoom))) || !fs.readdirSync(path.join(tilesRoot, String(maxZoom))).length) {
-            throw new Error('GDAL skapade inga XYZ-tiles.');
+        const vrtFiles = fs.readdirSync(sourceRoot).filter(file => /\.vrt$/i.test(file)).sort();
+        const preferredVrt = vrtFiles.find(file => file.toLowerCase() === 'index.vrt');
+        const rasterFiles = fs.readdirSync(sourceRoot).filter(file => /\.tiff?$/i.test(file)).sort();
+        if (preferredVrt) {
+            sourcePath = path.join(sourceRoot, preferredVrt);
+        } else if (rasterFiles.length) {
+            sourcePath = path.join(TERRAIN_SOURCE_ROOT, `${publicationId}.vrt`);
+            const listPath = path.join(outDir, 'source-filelist.txt');
+            fs.writeFileSync(listPath, rasterFiles.map(file => path.join(sourceRoot, file)).join('\n') + '\n');
+            await runGdalCommand(GDAL_BUILDVRT_CMD, ['-input_file_list', listPath, sourcePath], outDir);
+            fs.rmSync(listPath, { force: true });
+            sourceManaged = true;
+        } else {
+            if (!vrtFiles.length) throw new Error('Ingen TIFF eller VRT hittades i nedladdningsmappen.');
+            sourcePath = path.join(sourceRoot, vrtFiles[0]);
         }
+        const { stdout } = await runGdalCommand(GDAL_GDALINFO_CMD, ['-json', sourcePath], sourceRoot);
+        const sourceInfo = JSON.parse(stdout);
+        const pixelSizeMeters = Math.max(Math.abs(sourceInfo.geoTransform?.[1] || 0), Math.abs(sourceInfo.geoTransform?.[5] || 0));
+        if (!Number.isFinite(pixelSizeMeters) || pixelSizeMeters <= 0) throw new Error('Kunde inte läsa upplösningen från VRT-källan.');
 
         const catalogInfo = {
             alias,
             title: alias.replace(/_/g, ' '),
             folderName,
             publicFolder: outDir,
+            renderMode: 'ondemand',
+            sourceRaster: sourcePath,
+            sourceManaged,
+            cacheKey: randomUUID(),
             targetCrs: 'EPSG:3857',
-            resolutionMeters,
             hillshadeStyle,
             pixelSizeMeters,
-            maxZoom,
-            files: ['terrain_3857.tif', 'hillshade.tif'],
+            maxZoom: MAX_ZOOM,
             generatedAt: new Date().toISOString()
         };
-        fs.writeFileSync(path.join(outDir, 'catalog.json'), JSON.stringify(catalogInfo, null, 2));
         return { outDir, catalogInfo };
     } catch (error) {
+        if (sourceManaged && sourcePath) fs.rmSync(sourcePath, { force: true });
         fs.rmSync(outDir, { recursive: true, force: true });
         throw error;
     }
@@ -255,7 +242,8 @@ function buildCatalogConfig(req, catalog) {
         targetCrs: 'EPSG:3857',
         tileUrl: `${baseUrl}/tiles/{z}/{x}/{y}.png`,
         isPublic: catalog.isPublic !== false,
-        nativeMaxZoom: catalog.generated && catalog.generated.maxZoom,
+        renderMode: catalog.generated?.renderMode || 'pregenerated',
+        nativeMaxZoom: catalog.generated?.renderMode === 'ondemand' ? null : catalog.generated && catalog.generated.maxZoom,
         maxZoom: MAX_ZOOM,
         status: catalog.status || 'ready',
         updatedAt: catalog.updatedAt || new Date().toISOString()
@@ -268,6 +256,7 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
     if (!/^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(folderName) || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
         throw new Error('Ogiltig LMV-downloadmapp');
     }
+    if (!fs.readdirSync(folderPath).some(file => /\.(tiff?|vrt)$/i.test(file))) throw new Error('Ingen TIFF eller VRT hittades i nedladdningsmappen.');
     if (jobUsingFolder(folderName)) {
         throw new Error('Nedladdningen pågår fortfarande. Vänta tills jobbet är klart.');
     }
@@ -275,7 +264,6 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
     const alias = normalizeCatalogAlias(providedAlias || folderName.replace(/^LMV_DOWNLOADS_/, ''));
     const catTitle = String(title || alias.replace(/_/g, ' ')).trim() || alias;
     if (resolutionMeters !== 'original' && !ALLOWED_TERRAIN_RESOLUTIONS.has(Number(resolutionMeters))) throw new Error('Välj original eller 10, 20, 50 eller 100 meter.');
-    const safeResolution = resolutionMeters === 'original' ? 'original' : Number(resolutionMeters);
     const hillshadeStyle = { altitude: Number(rawStyle?.altitude ?? 35), strength: Number(rawStyle?.strength ?? 1.7) };
     if (!Number.isFinite(hillshadeStyle.altitude) || hillshadeStyle.altitude < 15 || hillshadeStyle.altitude > 80 ||
         !Number.isFinite(hillshadeStyle.strength) || hillshadeStyle.strength < 0.5 || hillshadeStyle.strength > 3) {
@@ -288,7 +276,7 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
     if (activePublications.has(alias)) throw new Error('Katalogen publiceras redan.');
     activePublications.add(alias);
     try {
-        const generated = await publishTerrainRasterFolder(folderName, alias, safeResolution, hillshadeStyle);
+        const generated = await publishTerrainRasterFolder(folderName, alias, hillshadeStyle);
         const previous = catalogs[alias];
         const newKey = !previous || (previous.isPublic === false && !previous.apiKeyHash) ? newServiceKey() : null;
         const entry = {
@@ -297,7 +285,7 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
             folderName,
             publicFolder: generated.outDir,
             publicUrl: getPublicBaseUrl(req, alias),
-            resolutionMeters: safeResolution,
+            resolutionMeters: resolutionMeters === 'original' ? 'original' : Number(resolutionMeters),
             hillshadeStyle,
             sourceCrs: 'detected by GDAL',
             targetCrs: 'EPSG:3857',
@@ -314,6 +302,7 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
                 const oldOutput = path.resolve(previous.publicFolder || path.join(TERRAIN_PUBLIC_ROOT, alias));
                 if (!oldOutput.startsWith(TERRAIN_PUBLIC_ROOT + path.sep)) throw new Error('Ogiltig publiceringsmapp');
                 fs.rmSync(oldOutput, { recursive: true, force: true });
+                removeCatalogGeneratedFiles(previous);
             } catch (error) {
                 writeToLog(`[TERRAIN] Kunde inte rensa tidigare publicering: ${error.message}`);
             }
@@ -346,14 +335,13 @@ const GDAL_WARP_CMD = path.join(
     process.platform === 'win32' ? 'gdalwarp.exe' : 'gdalwarp'
 );
 const GDAL_DEM_CMD = path.join(GDAL_BIN, process.platform === 'win32' ? 'gdaldem.exe' : 'gdaldem');
-const GDAL_PYTHON_ROOT = path.join(GDAL_ROOT || GDAL_BIN, '..', 'Python312');
-const GDAL_TILES_PYTHON = process.env.GDAL_TILES_PYTHON || path.join(GDAL_PYTHON_ROOT, process.platform === 'win32' ? 'python.exe' : 'bin/python3');
-const GDAL_TILES_SCRIPT = process.env.GDAL_TILES_SCRIPT || path.join(GDAL_PYTHON_ROOT, 'Scripts', 'gdal2tiles.py');
 const MANIFEST_NAME = 'manifest.json';
 const COMBINED_HOJD_FOLDER = 'LMV_DOWNLOADS_markhojd';
 
 // Standalone GDAL exes need these to resolve CRS (SWEREF99 TM) outside the QGIS shell.
 const GDAL_ENV = { ...process.env };
+GDAL_ENV.GDAL_NUM_THREADS ||= 'ALL_CPUS';
+GDAL_ENV.GDAL_CACHEMAX ||= '1024';
 if (process.platform === 'win32') {
     GDAL_ENV.PATH = [QGIS_ROOT, GDAL_ROOT, process.env.PATH].filter(Boolean).join(path.delimiter);
 }
@@ -361,6 +349,35 @@ const gdalDataDir = GDAL_ROOT ? path.join(GDAL_ROOT, 'share', 'gdal') : null;
 const projDataDir = QGIS_ROOT ? path.join(QGIS_ROOT, '..', 'share', 'proj') : null;
 if (gdalDataDir && fs.existsSync(gdalDataDir)) GDAL_ENV.GDAL_DATA = gdalDataDir;
 if (projDataDir && fs.existsSync(projDataDir)) GDAL_ENV.PROJ_DATA = GDAL_ENV.PROJ_LIB = projDataDir;
+const terrainTileRenderer = createTerrainTileRenderer({
+    warpPath: GDAL_WARP_CMD,
+    demPath: GDAL_DEM_CMD,
+    env: GDAL_ENV,
+    concurrency: Math.max(1, Number(process.env.ON_DEMAND_TILE_CONCURRENCY) || 2),
+    maxQueue: Math.max(1, Number(process.env.ON_DEMAND_TILE_QUEUE) || 64),
+    maxCacheBytes: Math.max(1, Number(process.env.TERRAIN_CACHE_MAX_GB) || 20) * 1024 ** 3
+});
+
+function renderTerrainTile(catalog, z, x, y) {
+    const generated = catalog.generated || {};
+    if (!generated.sourceRaster || !/^[a-f0-9-]{36}$/i.test(generated.cacheKey || '')) return Promise.resolve(null);
+    const sourcePath = path.resolve(generated.sourceRaster);
+    const downloadRoot = path.resolve(__dirname, catalog.folderName || '');
+    const sourceIsAllowed = sourcePath.startsWith(TERRAIN_SOURCE_ROOT + path.sep) ||
+        (catalog.folderName && /^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(catalog.folderName) && sourcePath.startsWith(downloadRoot + path.sep));
+    if (!sourceIsAllowed) return Promise.resolve(null);
+    const effectiveMaxZoom = maxZoomForResolution(catalog.resolutionMeters, generated.pixelSizeMeters);
+    const renderZoom = Math.min(z, effectiveMaxZoom);
+    const factor = 2 ** (z - renderZoom);
+    const renderX = Math.floor(x / factor);
+    const renderY = Math.floor(y / factor);
+    return terrainTileRenderer.render({
+        sourcePath,
+        cacheFolder: path.join(TERRAIN_CACHE_ROOT, generated.cacheKey),
+        style: catalog.hillshadeStyle || { altitude: 35, strength: 1.7 },
+        z: renderZoom, x: renderX, y: renderY
+    }).then(tile => tile && overzoomRenderedTile(tile, renderZoom, z, x, y));
+}
 const gdalCheck = validateGdalBinarySet();
 if (!gdalCheck.ok) {
     console.warn(gdalCheck.message);
@@ -516,7 +533,8 @@ function saveManifest(folder, manifest) {
 
 // Runs COG check/conversion in parallel with downloads; manifest updates stay on the single JS thread.
 // Aborting the signal kills running gdal processes; the original tile is untouched until the final rename.
-function createTileProcessor(folder, collectionId, manifest, signal, concurrency = 2) {
+// Each conversion already uses ALL_CPUS threads; more parallel files mostly adds disk contention.
+function createTileProcessor(folder, collectionId, manifest, signal, concurrency = Math.max(1, Number(process.env.COG_CONCURRENCY) || 2)) {
     const queue = [];
     const queued = new Set();
     const stats = { converted: 0, alreadyCog: 0, failed: 0, bytesBefore: 0, bytesAfter: 0 };
@@ -637,6 +655,34 @@ async function buildVrtWithStyle(folder, files, vrtName, logTag) {
     } catch (styleErr) {
         writeToLog(`[${logTag}] Kunde inte generera stil: ${styleErr.message}`);
     }
+}
+
+function refreshPublishedRasterCatalogs(folderName) {
+    const indexPath = path.resolve(__dirname, folderName, 'index.vrt');
+    if (!fs.existsSync(indexPath)) return;
+    const catalogs = loadPublishedCatalogs();
+    const refreshed = [];
+    for (const catalog of Object.values(catalogs)) {
+        if (catalog.folderName !== folderName) continue;
+        const previousGenerated = { ...(catalog.generated || {}) };
+        catalog.generated = {
+            ...previousGenerated,
+            renderMode: 'ondemand',
+            sourceRaster: indexPath,
+            sourceManaged: false,
+            cacheKey: randomUUID(),
+            generatedAt: new Date().toISOString()
+        };
+        catalog.updatedAt = new Date().toISOString();
+        refreshed.push(previousGenerated);
+    }
+    if (!refreshed.length) return;
+    savePublishedCatalogs(catalogs);
+    for (const previous of refreshed) {
+        try { removeCatalogGeneratedFiles({ generated: previous }); }
+        catch (error) { writeToLog(`[TERRAIN] Kunde inte rensa gammal rastercache: ${error.message}`); }
+    }
+    writeToLog(`[TERRAIN] Publicerade XYZ-kataloger för ${folderName} kopplade till uppdaterat index.vrt.`);
 }
 
 function buildDynamicQml(minVal, maxVal, step = 5) {
@@ -1573,6 +1619,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         if (job) job.progress.phase = 'vrt';
         try {
             await buildVrtWithStyle(downloadFolderName, Object.keys(manifest.tiles).sort(), 'index.vrt', collectionId);
+                    refreshPublishedRasterCatalogs(downloadFolderName);
         } catch (postErr) {
             writeToLog(`[${collectionId}] Fel vid skapande av VRT: ${postErr.message}`);
         }
@@ -1895,9 +1942,11 @@ app.get('/terrain/catalogs', (req, res) => {
             alias: item.alias,
             title: item.title,
             folderName: item.folderName,
+            vrtPath: item.generated?.sourceRaster || null,
             tileUrl: buildCatalogConfig(req, item).tileUrl,
             resolutionMeters: item.resolutionMeters,
             hillshadeStyle: item.hillshadeStyle || { altitude: 45, strength: 1 },
+            renderMode: item.generated?.renderMode || 'pregenerated',
             isPublic: item.isPublic !== false,
             targetCrs: item.targetCrs || 'EPSG:3857',
             updatedAt: item.updatedAt
@@ -1994,6 +2043,21 @@ app.get('/terrain/:catalog/config/:kind', (req, res) => {
 app.get('/terrain/:catalog/tiles/:z/:x/:y.png', async (req, res, next) => {
     const catalog = loadPublishedCatalogs()[normalizeCatalogAlias(req.params.catalog)];
     if (!catalog) return res.sendStatus(404);
+    if (catalog.generated?.renderMode === 'ondemand') {
+        try {
+            const tile = await renderTerrainTile(catalog, Number(req.params.z), Number(req.params.x), Number(req.params.y));
+            if (!tile) return res.sendStatus(404);
+            res.setHeader('Cache-Control', catalog.isPublic === false ? 'private, max-age=60' : 'public, max-age=60');
+            return res.type('png').send(tile);
+        } catch (error) {
+            if (error.code === 'TILE_QUEUE_FULL') {
+                res.setHeader('Retry-After', '5');
+                return res.status(503).json({ error: 'Tile-renderingskön är full. Försök igen strax.' });
+            }
+            writeToLog(`[TERRAIN] On-demand tile-fel (${catalog.alias}): ${error.message}`);
+            return res.sendStatus(500);
+        }
+    }
     const nativeZoom = catalog.generated && Number(catalog.generated.maxZoom);
     const zoom = Number(req.params.z);
     if (!Number.isSafeInteger(nativeZoom) || zoom <= nativeZoom) return next();
