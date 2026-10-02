@@ -83,6 +83,7 @@ test('GDAL renders an XYZ tile and reuses the disk cache', { skip: !process.env.
         const renderer = createTerrainTileRenderer({
             warpPath: executable('gdalwarp'),
             demPath: executable('gdaldem'),
+            translatePath: executable('gdal_translate'),
             env: process.env,
             concurrency: 1
         });
@@ -98,6 +99,24 @@ test('GDAL renders an XYZ tile and reuses the disk cache', { skip: !process.env.
         const second = await renderer.render(options);
         assert.equal(first.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
         assert.deepEqual(second, first);
+
+        const partialSourcePath = path.join(folder, 'partial-source.tif');
+        const partialCreate = spawnSync(executable('gdal_create'), [
+            '-of', 'GTiff', '-outsize', '512', '512', '-bands', '1', '-burn', '100',
+            '-a_srs', 'EPSG:3857', '-a_ullr', '-1000000', '1000000', '1000000', '-1000000', partialSourcePath
+        ], { env: process.env, windowsHide: true });
+        assert.equal(partialCreate.status, 0, partialCreate.stderr.toString());
+        const partialTile = await renderer.render({ ...options, sourcePath: partialSourcePath, z: 0, x: 0, y: 0 });
+        const sharp = require('sharp');
+        const { data, info } = await sharp(partialTile).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        let transparentPixels = 0;
+        let opaquePixels = 0;
+        for (let offset = 3; offset < data.length; offset += info.channels) {
+            if (data[offset] === 0) transparentPixels++;
+            if (data[offset] === 255) opaquePixels++;
+        }
+        assert.ok(transparentPixels > 0, 'outside-coverage pixels should be transparent');
+        assert.ok(opaquePixels > 0, 'inside-coverage pixels should remain visible');
     } finally {
         fs.rmSync(folder, { recursive: true, force: true });
     }

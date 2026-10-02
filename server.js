@@ -352,6 +352,7 @@ if (projDataDir && fs.existsSync(projDataDir)) GDAL_ENV.PROJ_DATA = GDAL_ENV.PRO
 const terrainTileRenderer = createTerrainTileRenderer({
     warpPath: GDAL_WARP_CMD,
     demPath: GDAL_DEM_CMD,
+    translatePath: GDAL_TRANSLATE_CMD,
     env: GDAL_ENV,
     concurrency: Math.max(1, Number(process.env.ON_DEMAND_TILE_CONCURRENCY) || 2),
     maxQueue: Math.max(1, Number(process.env.ON_DEMAND_TILE_QUEUE) || 64),

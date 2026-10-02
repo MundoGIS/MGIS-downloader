@@ -1,12 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { randomUUID } = require('crypto');
+const { createHash, randomUUID } = require('crypto');
 
 const MAX_ZOOM = 22;
 const TILE_SIZE = 256;
 const WEB_MERCATOR_LIMIT = 20037508.342789244;
 const WEB_MERCATOR_BASE_RESOLUTION = 156543.03392804097;
+const TILE_RENDER_VERSION = 'alpha-v5';
 
 function maxZoomForResolution(resolutionMeters, sourcePixelSizeMeters = 0) {
     const requested = resolutionMeters === 'original' ? 0 : Number(resolutionMeters);
@@ -90,7 +91,7 @@ async function pruneCache(folder, maxBytes) {
     }
 }
 
-function createTerrainTileRenderer({ warpPath, demPath, env, concurrency = 2, maxQueue = 64, maxCacheBytes = 20 * 1024 ** 3 }) {
+function createTerrainTileRenderer({ warpPath, demPath, translatePath, env, concurrency = 2, maxQueue = 64, maxCacheBytes = 20 * 1024 ** 3 }) {
     const queue = [];
     const pending = new Map();
     const lastPrune = new Map();
@@ -101,8 +102,13 @@ function createTerrainTileRenderer({ warpPath, demPath, env, concurrency = 2, ma
         if (!bounds || !sourcePath || !fs.existsSync(sourcePath)) return null;
         if (!Number.isFinite(style?.altitude) || !Number.isFinite(style?.strength)) throw new Error('Ogiltig hillshade-stil.');
 
-        const styleKey = `${style.altitude}-${style.strength}`;
-        const tilePath = path.join(cacheFolder, styleKey, String(z), String(x), `${y}.png`);
+        const sourceStat = fs.statSync(sourcePath);
+        const sourceKey = createHash('sha256')
+            .update(`${path.resolve(sourcePath)}|${sourceStat.size}|${sourceStat.mtimeMs}`)
+            .digest('hex')
+            .slice(0, 16);
+        const styleKey = `${TILE_RENDER_VERSION}-${style.altitude}-${style.strength}`;
+        const tilePath = path.join(cacheFolder, sourceKey, styleKey, String(z), String(x), `${y}.png`);
         try {
             const cached = await fs.promises.readFile(tilePath);
             const now = new Date();
@@ -119,13 +125,14 @@ function createTerrainTileRenderer({ warpPath, demPath, env, concurrency = 2, ma
         await fs.promises.mkdir(tempDir);
         const warpedPath = path.join(tempDir, 'elevation.tif');
         const hillshadePath = path.join(tempDir, 'hillshade.tif');
+        const alphaPath = path.join(tempDir, 'alpha.png');
         const pngPath = path.join(tempDir, 'tile.png');
         const boundsArgs = [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY].map(value => value.toFixed(8));
 
         try {
             await runCommand(warpPath, [
                 '-q', '-overwrite', '-multi', '-wm', '64', '-wo', 'NUM_THREADS=2',
-                '-t_srs', 'EPSG:3857', '-te', ...boundsArgs, '-ts', String(TILE_SIZE + 2), String(TILE_SIZE + 2),
+                '-t_srs', 'EPSG:3857', '-te', ...boundsArgs, '-ts', String(TILE_SIZE + 2), String(TILE_SIZE + 2), '-dstalpha',
                 '-r', 'bilinear', '-of', 'GTiff', '-co', 'COMPRESS=DEFLATE', '-co', 'NUM_THREADS=ALL_CPUS',
                 sourcePath, warpedPath
             ], tempDir, env);
@@ -134,11 +141,18 @@ function createTerrainTileRenderer({ warpPath, demPath, env, concurrency = 2, ma
                 '-alt', String(style.altitude), '-z', String(style.strength), '-compute_edges',
                 '-of', 'GTiff', '-co', 'COMPRESS=DEFLATE'
             ], tempDir, env);
+            await runCommand(translatePath, ['-q', '-b', '2', '-of', 'PNG', warpedPath, alphaPath], tempDir, env);
             const sharp = require('sharp');
-            await sharp(hillshadePath)
-                .extract({ left: 1, top: 1, width: TILE_SIZE, height: TILE_SIZE })
-                .png()
-                .toFile(pngPath);
+            const crop = { left: 1, top: 1, width: TILE_SIZE, height: TILE_SIZE };
+            const hillshade = await sharp(hillshadePath).extract(crop).greyscale().raw().toBuffer();
+            const alpha = await sharp(alphaPath).extract(crop).greyscale().raw().toBuffer();
+            const rgba = Buffer.allocUnsafe(TILE_SIZE * TILE_SIZE * 4);
+            for (let pixel = 0; pixel < TILE_SIZE * TILE_SIZE; pixel++) {
+                const offset = pixel * 4;
+                rgba[offset] = rgba[offset + 1] = rgba[offset + 2] = hillshade[pixel];
+                rgba[offset + 3] = alpha[pixel];
+            }
+            await sharp(rgba, { raw: { width: TILE_SIZE, height: TILE_SIZE, channels: 4 } }).png().toFile(pngPath);
             await fs.promises.rename(pngPath, tilePath);
 
             const nowMs = Date.now();
@@ -169,7 +183,7 @@ function createTerrainTileRenderer({ warpPath, demPath, env, concurrency = 2, ma
         render(options) {
             const bounds = xyzTileBounds(options.z, options.x, options.y);
             if (!bounds) return Promise.resolve(null);
-            const styleKey = `${options.style?.altitude}-${options.style?.strength}`;
+            const styleKey = `${TILE_RENDER_VERSION}-${options.style?.altitude}-${options.style?.strength}`;
             const key = `${path.resolve(options.sourcePath)}|${path.resolve(options.cacheFolder)}|${styleKey}|${options.z}/${options.x}/${options.y}`;
             if (pending.has(key)) return pending.get(key);
             if (queue.length >= maxQueue) {

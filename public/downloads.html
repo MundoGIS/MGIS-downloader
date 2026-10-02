@@ -1,5 +1,3 @@
-                            <strong>${escapeHtml(catalog.title)} (${escapeHtml(catalog.renderMode === 'ondemand' ? `XYZ bajo demanda, ${catalog.resolutionMeters === 'original' ? 'original' : 'máx. ' + catalog.resolutionMeters + ' m'}` : catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m')})</strong>
-    async function publishCatalog(folderName) {
 <!DOCTYPE html>
 <html lang="sv">
 <head>
@@ -211,19 +209,19 @@
                     </div>
                     ${published.map(catalog => `
                     <div class="published-catalog" style="margin:10px 0; min-width:0;">
-                        <strong>${escapeHtml(catalog.title)} (${escapeHtml(catalog.renderMode === 'ondemand' ? 'XYZ on-demand' : catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m')})</strong>
+                        <strong>${escapeHtml(catalog.title)} (${escapeHtml(catalog.renderMode === 'ondemand' ? `XYZ bajo demanda, ${catalog.resolutionMeters === 'original' ? 'original' : 'máx. ' + catalog.resolutionMeters + ' m'}` : catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m')})</strong>
                         <label style="display:inline-flex;align-items:center;gap:6px;margin:0 10px;">
                             <input type="checkbox" ${catalog.isPublic === false ? '' : 'checked'} onchange="setCatalogAccess('${escapeHtml(catalog.alias)}', this.checked)">
                             Public
                         </label>
                         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0;">
-                            <code style="overflow-wrap:anywhere;min-width:0;flex:1;">${escapeHtml(serviceTileUrl(catalog))}</code>
+                            <input type="text" readonly spellcheck="false" aria-label="XYZ URL para QGIS, Hajk y Origo" value="${escapeHtml(serviceTileUrl(catalog))}" onclick="this.select()" onfocus="this.select()" style="min-width:0;flex:1;padding:7px 9px;font-family:monospace;font-size:0.82em;">
                             <button type="button" class="btn btn-secondary btn-sm" title="Kopiera XYZ-länk" onclick="copyCatalogLink('${escapeHtml(catalog.alias)}')">Kopiera länk</button>
                             ${catalog.vrtPath ? `<button type="button" class="btn btn-secondary btn-sm" title="Kopiera sökvägen till VRT på servern" onclick="copyVrtPath('${escapeHtml(catalog.alias)}')">Kopiera VRT-sökväg</button>` : ''}
-                                                    ${catalog.vrtPath ? `<small style="display:block;overflow-wrap:anywhere;margin-top:5px;">VRT lokal på servern: <code>${escapeHtml(catalog.vrtPath)}</code></small>` : ''}
                             ${catalog.isPublic === false ? `<button type="button" class="btn btn-secondary btn-sm" title="Ogiltigförklara tidigare nyckel" onclick="rotateCatalogKey('${escapeHtml(catalog.alias)}')">Ny API-nyckel</button>` : ''}
                             <button type="button" class="btn btn-danger btn-sm" title="Ta bort publicerade karttiles" onclick="unpublishCatalog('${escapeHtml(catalog.alias)}')" ${cleanupSupported ? '' : 'disabled'}>Avpublicera</button>
                         </div>
+                        ${catalog.vrtPath ? `<small style="display:block;overflow-wrap:anywhere;margin-top:5px;">VRT local en el servidor: <code>${escapeHtml(catalog.vrtPath)}</code></small>` : ''}
                     </div>`).join('')}
                     ${message ? `<p role="status" style="overflow-wrap:anywhere;">${escapeHtml(message)}</p>` : ''}
                     
@@ -238,8 +236,6 @@
                                 ${[['original', 'Original'], ['10', '10 m'], ['20', '20 m'], ['50', '50 m'], ['100', '100 m']].map(([value, label]) => `<option value="${value}" ${selectedResolution === value ? 'selected' : ''}>${label}</option>`).join('')}
                             </select>
                         </label>
-                                                <button class="btn btn-primary btn-sm ${publishing ? 'publish-pending' : ''}" onclick="publishCatalog('${escapeHtml(download.name)}', document.getElementById('resolution-${escapeHtml(download.name)}').value)" ${!cleanupSupported || activeJob || !(download.tifCount || download.hasVrt) || publishing ? 'disabled title="Vänta tills TIFF- eller VRT-filerna är klara"' : ''}>
-                            async function publishCatalog(folderName, resolutionOverride) {
                         <label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8em;color:#444;">
                             <span>Ljusvinkel</span>
                             <input type="number" min="15" max="80" step="1" value="${escapeHtml(style.altitude)}" title="Lägre vinkel ger mörkare skuggor (15-80°)" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'altitude', this.value)" style="width:65px;padding:6px;">°
@@ -248,7 +244,7 @@
                             <span>Reliefstyrka</span>
                             <input type="number" min="0.5" max="3" step="0.1" value="${escapeHtml(style.strength)}" title="Högre värde ger mer markerad terräng (0,5-3)" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'strength', this.value)" style="width:65px;padding:6px;">
                         </label>
-                        <button class="btn btn-primary btn-sm ${publishing ? 'publish-pending' : ''}" onclick="publishCatalog('${escapeHtml(download.name)}')" ${!cleanupSupported || activeJob || !(download.tifCount || download.hasVrt) || publishing ? 'disabled title="Vänta tills TIFF- eller VRT-filerna är klara"' : ''}>
+                        <button class="btn btn-primary btn-sm ${publishing ? 'publish-pending' : ''}" onclick="publishCatalog('${escapeHtml(download.name)}', document.getElementById('resolution-${escapeHtml(download.name)}').value)" ${!cleanupSupported || activeJob || !(download.tifCount || download.hasVrt) || publishing ? 'disabled title="Vänta tills TIFF- eller VRT-filerna är klara"' : ''}>
                             ${publishing ? 'Publicerar...' : published.length ? 'Publicera om' : 'Publicera XYZ'}
                         </button>
                         <button class="btn btn-success btn-sm" onclick="downloadFolder('${escapeHtml(download.name)}')" ${lock}>
