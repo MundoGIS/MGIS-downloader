@@ -22,6 +22,11 @@ test('only admins may delete download folders', async () => {
         publicationJobs: new Map(),
         loadPublishedCatalogs: () => ({}),
         removePublishedCatalogs: () => {},
+        removeDownloadMeta: () => {},
+        refreshCombinedVrts: async () => [],
+        rotateCatalogCaches: () => {},
+        pathKey: value => value,
+        COMBINED_HOJD_FOLDER: 'LMV_DOWNLOADS_markhojd',
         writeToLog: () => {}
     });
     const server = await new Promise(resolve => {

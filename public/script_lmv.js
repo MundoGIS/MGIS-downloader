@@ -402,15 +402,16 @@ document.addEventListener('DOMContentLoaded', function() {
         clearMessages();
         disableButtons(true);
 
+        const useSaved = window.lmvUsesSavedAccount?.();
         const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
-        const apiUsername = document.getElementById('apiUsername').value.trim();
-        const apiKey = document.getElementById('apiKey').value.trim();
-        const apiToken = document.getElementById('apiToken').value.trim();
+        const apiUsername = useSaved ? '' : document.getElementById('apiUsername').value.trim();
+        const apiKey = useSaved ? '' : document.getElementById('apiKey').value.trim();
+        const apiToken = useSaved ? '' : document.getElementById('apiToken').value.trim();
         const collectionId = document.getElementById('collection-select').value;
-        if (authMethod === 'userpass') {
+        if (!useSaved && authMethod === 'userpass') {
             if (!apiUsername) { showMessage('Vänligen ange ditt användarnamn.', 'error'); disableButtons(false); return; }
             if (!apiKey) { showMessage('Vänligen ange din LMV STAC API Key.', 'error'); disableButtons(false); return; }
-        } else {
+        } else if (!useSaved) {
             if (!apiToken) { showMessage('Vänligen ange din Auth token.', 'error'); disableButtons(false); return; }
         }
         if (!collectionId) { showMessage('Vänligen välj en datakollektion.', 'error'); disableButtons(false); return; }
@@ -528,11 +529,12 @@ document.addEventListener('DOMContentLoaded', function() {
     fullDownloadBtn.addEventListener('click', async () => {
         console.log("Knappen 'Ladda ner hela Sverige' klickades.");
 
-        const apiUsername = document.getElementById('apiUsername').value.trim();
-        const apiKey = document.getElementById('apiKey').value.trim();
+        const useSaved = window.lmvUsesSavedAccount?.();
+        const apiUsername = useSaved ? '' : document.getElementById('apiUsername').value.trim();
+        const apiKey = useSaved ? '' : document.getElementById('apiKey').value.trim();
         const collectionId = document.getElementById('collection-select').value;
 
-        if (!apiUsername || !apiKey || !collectionId) {
+        if ((!useSaved && (!apiUsername || !apiKey)) || !collectionId) {
             showMessage('Ange ditt användarnamn, API-nyckel och välj en samling innan du startar nedladdningen.', 'error');
             return;
         }

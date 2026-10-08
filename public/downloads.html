@@ -59,6 +59,20 @@
 
     <div id="toast" role="status" aria-live="polite"></div>
 
+    <dialog id="metaDialog" class="meta-dialog">
+        <form id="metaForm" method="dialog">
+            <h2>Namn och beskrivning</h2>
+            <p class="meta-dialog-folder" id="metaFolder"></p>
+            <label>Namn<input id="metaName" maxlength="100" placeholder="T.ex. Rabbalshede vindpark"></label>
+            <label>Beskrivning<textarea id="metaDescription" maxlength="2000" rows="5" placeholder="Vad området används till, beställare, datum..."></textarea></label>
+            <p id="metaError" role="alert"></p>
+            <div class="meta-dialog-actions">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('metaDialog').close()">Avbryt</button>
+                <button type="submit" class="btn btn-primary btn-sm">Spara</button>
+            </div>
+        </form>
+    </dialog>
+
     <script src="auth-nav.js" defer></script>
     <script>
         let downloads = [];
@@ -135,6 +149,7 @@
                     downloads = data.downloads;
                     catalogs = catalogData.catalogs;
                     cleanupSupported = catalogData.supportsCleanup === true;
+                    await Promise.all(catalogs.filter(catalog => catalog.isPublic === false && !serviceKeys.has(catalog.alias)).map(fetchServiceKey));
                     renderDownloads();
                 } else {
                     throw new Error(data.error);
@@ -179,7 +194,9 @@
                 <div class="download-card">
                     <div class="download-header">
                         <div style="flex: 1;">
-                            <div class="download-title">${escapeHtml(download.name)}</div>
+                            <div class="download-title">${escapeHtml(download.displayName || download.name)}</div>
+                            ${download.displayName ? `<div class="download-folder">${escapeHtml(download.name)}</div>` : ''}
+                            ${download.description ? `<p class="download-description">${escapeHtml(download.description)}</p>` : ''}
                             <div class="download-badges">
                                 ${activeJob ? `<span class="badge badge-running"><span class="mini-spinner"></span>${activeJob.status === 'stopping' ? 'Stoppas' : 'Pågår'}</span>` : ''}
                                 ${download.hasMerged ? '<span class="badge badge-success">✓ Merged</span>' : ''}
@@ -250,6 +267,8 @@
                         <button class="btn btn-success btn-sm" onclick="downloadFolder('${escapeHtml(download.name)}')" ${lock}>
                             ⬇️ Ladda ner ZIP
                         </button>
+                        <button class="btn btn-secondary btn-sm" onclick="openMetaEditor('${escapeHtml(download.name)}')">✏️ Namn &amp; beskrivning</button>
+                        ${download.tifCount ? `<a class="btn btn-secondary btn-sm" href="download-viewer.html?folder=${encodeURIComponent(download.name)}">🗺️ Visa rutor${canDeleteDownloads ? ' / ta bort' : ''}</a>` : ''}
                         ${canDeleteDownloads ? `<button class="btn btn-danger btn-sm" onclick="deleteFolder('${escapeHtml(download.name)}')" ${!cleanupSupported || activeJob || publishing ? 'disabled' : ''}>
                             🗑️ Ta bort
                         </button>` : ''}
@@ -263,6 +282,50 @@
         function downloadFolder(folderName) {
             const url = `/lmv/downloads/download/${encodeURIComponent(folderName)}`;
             window.location.href = url;
+        }
+
+        let editingFolder = null;
+        function openMetaEditor(folderName) {
+            const download = downloads.find(item => item.name === folderName);
+            if (!download) return;
+            editingFolder = folderName;
+            document.getElementById('metaFolder').textContent = folderName;
+            document.getElementById('metaName').value = download.displayName || '';
+            document.getElementById('metaDescription').value = download.description || '';
+            document.getElementById('metaError').textContent = '';
+            document.getElementById('metaDialog').showModal();
+        }
+
+        document.getElementById('metaForm').addEventListener('submit', async event => {
+            event.preventDefault();
+            if (!editingFolder) return;
+            try {
+                const response = await fetch(`/lmv/downloads/${encodeURIComponent(editingFolder)}/meta`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        displayName: document.getElementById('metaName').value,
+                        description: document.getElementById('metaDescription').value
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || 'Kunde inte spara.');
+                document.getElementById('metaDialog').close();
+                await loadDownloads();
+            } catch (error) {
+                document.getElementById('metaError').textContent = error.message;
+            }
+        });
+
+        async function fetchServiceKey(catalog) {
+            try {
+                const response = await fetch(`/terrain/${encodeURIComponent(catalog.alias)}/api-key`);
+                const data = await response.json();
+                if (response.ok && data.apiKey) serviceKeys.set(catalog.alias, data.apiKey);
+            } catch (error) {
+                console.warn('Kunde inte hämta API-nyckel:', error.message);
+            }
+            return serviceKeys.get(catalog.alias);
         }
 
         function setHillshadeStyle(folderName, field, value) {
@@ -348,8 +411,9 @@
             if (!catalog) return;
             try {
                 let key = serviceKeys.get(alias);
+                if (catalog.isPublic === false && !key) key = await fetchServiceKey(catalog);
                 if (catalog.isPublic === false && !key) {
-                    key = prompt('Ange API-nyckeln för katalogen, eller generera en ny:');
+                    key = prompt('Nyckeln är inte sparad på servern. Ange API-nyckeln, eller avbryt och skapa en ny:');
                     if (!key) return;
                     if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Ogiltig API-nyckel.');
                     serviceKeys.set(alias, key);
@@ -386,7 +450,7 @@
                 if (!response.ok) throw new Error(result.error || 'Kunde inte ändra åtkomst.');
                 serviceKeys.delete(alias);
                 if (result.apiKey) serviceKeys.set(alias, result.apiKey);
-                publicationMessages.set(catalog.folderName, result.apiKey ? 'Ny API-nyckel visas endast i denna flik. Kopiera länken nu.' : isPublic ? 'Tjänsten är publik.' : 'Tjänsten är privat.');
+                publicationMessages.set(catalog.folderName, result.apiKey ? 'Ny API-nyckel skapad. Gamla länkar slutar fungera.' : isPublic ? 'Tjänsten är publik.' : 'Tjänsten är privat. Befintlig API-nyckel används.');
                 await loadDownloads();
             } catch (error) {
                 publicationMessages.set(catalog.folderName, error.message);

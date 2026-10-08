@@ -1194,6 +1194,28 @@ body.admin-page { background: #edf2f3; color: #193332; font: 16px/1.5 'Trebuchet
 .admin-page main li { list-style: none; border-bottom: 1px solid #ddd; padding: 12px 0; }
 .admin-page main ul { margin: 0; padding: 0; }
 .admin-page #message { min-height: 1.5em; }
+.admin-page .lmv-status { margin: 0 0 12px; color: #34514e; }
+.admin-page #lmvMessage { min-height: 1.5em; margin: 10px 0 0; }
+
+/* Download names, descriptions and tile viewer */
+.download-folder { font-size: 0.8em; color: #6c757d; overflow-wrap: anywhere; }
+.download-description { margin: 6px 0 0; color: #444; white-space: pre-wrap; overflow-wrap: anywhere; }
+.meta-dialog { border: 1px solid #cbd8d8; border-radius: 8px; padding: 20px; width: min(520px, 92vw); }
+.meta-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
+.meta-dialog h2 { margin: 0 0 4px; font-size: 1.2em; }
+.meta-dialog label { display: grid; gap: 4px; margin: 10px 0; font-weight: 600; }
+.meta-dialog input, .meta-dialog textarea { width: 100%; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font: inherit; box-sizing: border-box; }
+.meta-dialog-folder { margin: 0; font-size: 0.8em; color: #6c757d; }
+.meta-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+#metaError { color: #b13331; min-height: 1em; margin: 0; }
+.viewer-page .viewer-heading h1 { margin: 6px 0 0; }
+.viewer-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 6px; }
+.viewer-toolbar #viewerStats { font-weight: 600; margin-right: auto; }
+.viewer-help { font-size: 0.85em; color: #555; margin: 0 0 6px; }
+#viewerMessage { min-height: 1.2em; margin: 0 0 8px; }
+#viewerMap { height: 70vh; min-height: 420px; border: 1px solid #dee2e6; border-radius: 8px; }
+.lmv-saved-account { margin: 8px 0 12px; padding: 10px 12px; background: #e8f2ef; border-left: 4px solid #15766a; border-radius: 4px; }
+.lmv-saved-account label { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-weight: normal; }
 
 /* Help */
 .help-page .help-container { max-width: 980px; margin: 0 auto; }

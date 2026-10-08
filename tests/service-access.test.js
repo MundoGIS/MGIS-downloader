@@ -59,10 +59,10 @@ test('private XYZ API keys, public toggle and rotation', async () => {
         assert.equal((await tile(second)).status, 200);
         await access(true);
         assert.equal((await tile()).status, 200);
-        const third = (await access(false)).apiKey;
-        assert.notEqual(third, second);
-        assert.equal((await tile(second)).status, 401);
-        assert.equal((await tile(third)).status, 200);
+        const reused = await access(false);
+        assert.equal(reused.apiKey, undefined);
+        assert.equal((await tile()).status, 401);
+        assert.equal((await tile(second)).status, 200);
     } finally {
         await new Promise(resolve => server.close(resolve));
         fs.rmSync(directory, { recursive: true, force: true });

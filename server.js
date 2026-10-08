@@ -17,6 +17,7 @@ const { spawn } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const archiver = require('archiver');
 const { installAuth } = require('./auth');
+const { encryptSecret, decryptSecret, readLmvAccount, lmvAccountSummary, saveLmvAccount, deleteLmvAccount } = require('./secrets');
 const { MAX_ZOOM, overzoomTile } = require('./terrain-tiles');
 const { createTerrainTileRenderer, maxZoomForResolution, overzoomRenderedTile } = require('./terrain-renderer');
 const app = express();
@@ -33,6 +34,9 @@ const DEFAULT_TERRAIN_RESOLUTION = 10;
 const ALLOWED_TERRAIN_RESOLUTIONS = new Set([10, 20, 50, 100]);
 const activePublications = new Set();
 const publicationJobs = new Map();
+const rasterMaintenance = new Set();
+const DOWNLOAD_META_FILE = path.join(__dirname, 'data', 'download_meta.json');
+const DOWNLOAD_FOLDER_PATTERN = /^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/;
 
 app.use(bodyParser.json({ limit: '50mb' }));
 app.set('trust proxy', 'loopback');
@@ -88,7 +92,7 @@ function savePublishedCatalogs(catalogs) {
 
 function newServiceKey() {
     const key = randomBytes(32).toString('hex');
-    return { key, hash: createHash('sha256').update(key).digest('hex') };
+    return { key, hash: createHash('sha256').update(key).digest('hex'), encrypted: encryptSecret(key) };
 }
 
 function removePublishedCatalogs(catalogs, aliases) {
@@ -292,6 +296,7 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
             status: 'ready',
             isPublic: previous ? previous.isPublic !== false : false,
             apiKeyHash: newKey ? newKey.hash : previous.apiKeyHash,
+            apiKeyEncrypted: newKey ? newKey.encrypted : previous.apiKeyEncrypted,
             updatedAt: new Date().toISOString(),
             generated: generated.catalogInfo
         };
@@ -684,6 +689,170 @@ function refreshPublishedRasterCatalogs(folderName) {
         catch (error) { writeToLog(`[TERRAIN] Kunde inte rensa gammal rastercache: ${error.message}`); }
     }
     writeToLog(`[TERRAIN] Publicerade XYZ-kataloger för ${folderName} kopplade till uppdaterat index.vrt.`);
+}
+
+function pathKey(target) {
+    const resolved = path.resolve(target);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function manifestTileFeatures(manifest) {
+    return Object.values(manifest.tiles)
+        .filter(t => Array.isArray(t.bbox) && t.bbox.length === 4)
+        .map(t => {
+            const [minx, miny, maxx, maxy] = t.bbox;
+            return {
+                type: 'Feature',
+                properties: { id: t.id, filename: t.filename, location: `./${t.filename}` },
+                geometry: { type: 'Polygon', coordinates: [[[minx, miny], [maxx, miny], [maxx, maxy], [minx, maxy], [minx, miny]]] }
+            };
+        });
+}
+
+function writeTileIndexFile(folder, collectionId, features) {
+    const indexFile = path.join(folder, 'tile_index.geojson');
+    if (!features.length) return fs.rmSync(indexFile, { force: true });
+    fs.writeFileSync(indexFile, JSON.stringify({
+        type: 'FeatureCollection',
+        name: `TileIndex_${collectionId}`,
+        crs: { type: 'name', properties: { name: 'urn:ogc:def:crs:OGC:1.3:CRS84' } },
+        features
+    }, null, 2));
+}
+
+function loadDownloadMeta() {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(DOWNLOAD_META_FILE, 'utf8'));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+        if (error.code !== 'ENOENT') writeToLog(`[META] Kunde inte läsa nedladdningsbeskrivningar: ${error.message}`);
+        return {};
+    }
+}
+
+function saveDownloadMeta(meta) {
+    fs.mkdirSync(path.dirname(DOWNLOAD_META_FILE), { recursive: true });
+    const temporary = `${DOWNLOAD_META_FILE}.${randomUUID()}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(meta, null, 2));
+    fs.renameSync(temporary, DOWNLOAD_META_FILE);
+}
+
+function removeDownloadMeta(folderName) {
+    const meta = loadDownloadMeta();
+    if (!meta[folderName]) return;
+    delete meta[folderName];
+    saveDownloadMeta(meta);
+}
+
+function downloadFolderPath(folderName) {
+    if (!DOWNLOAD_FOLDER_PATTERN.test(String(folderName || ''))) return null;
+    const folderPath = path.join(__dirname, folderName);
+    return fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory() ? folderPath : null;
+}
+
+async function rasterWgs84Bbox(rasterPath) {
+    try {
+        const { stdout } = await runGdalCommand(GDAL_GDALINFO_CMD, ['-json', rasterPath]);
+        const ring = JSON.parse(stdout).wgs84Extent?.coordinates?.[0];
+        if (!Array.isArray(ring) || !ring.length) return null;
+        const lons = ring.map(point => point[0]);
+        const lats = ring.map(point => point[1]);
+        return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
+    } catch (error) {
+        writeToLog(`[TILES] Kunde inte läsa utbredning för ${path.basename(rasterPath)}: ${error.message}`);
+        return null;
+    }
+}
+
+// Keeps the source VRT but gives the catalog a fresh tile cache; catalogs whose VRT vanished are unpublished.
+function rotateCatalogCaches(sourcePaths) {
+    const keys = new Set([...sourcePaths].map(pathKey));
+    const catalogs = loadPublishedCatalogs();
+    const missing = [];
+    const staleCaches = [];
+    for (const [alias, catalog] of Object.entries(catalogs)) {
+        const source = catalog.generated?.sourceRaster;
+        if (catalog.generated?.renderMode !== 'ondemand' || !source || !keys.has(pathKey(source))) continue;
+        if (!fs.existsSync(source)) { missing.push(alias); continue; }
+        staleCaches.push(catalog.generated.cacheKey);
+        catalog.generated = { ...catalog.generated, cacheKey: randomUUID(), generatedAt: new Date().toISOString() };
+        catalog.updatedAt = new Date().toISOString();
+    }
+    if (staleCaches.length) savePublishedCatalogs(catalogs);
+    for (const key of staleCaches) {
+        if (/^[a-f0-9-]{36}$/i.test(key || '')) fs.rmSync(path.join(TERRAIN_CACHE_ROOT, key), { recursive: true, force: true });
+    }
+    if (missing.length) removePublishedCatalogs(loadPublishedCatalogs(), missing);
+}
+
+// Combined Markhöjd VRTs reference tiles in other folders, so they must drop removed files too.
+async function refreshCombinedVrts(deletedPathKeys) {
+    const combined = path.join(__dirname, COMBINED_HOJD_FOLDER);
+    if (!deletedPathKeys.size || !fs.existsSync(combined)) return [];
+    const changed = [];
+    for (const listName of fs.readdirSync(combined).filter(file => file.endsWith('_filelist.txt'))) {
+        const vrtName = listName.replace(/_filelist\.txt$/, '.vrt');
+        const entries = fs.readFileSync(path.join(combined, listName), 'utf8').split(/\r?\n/).filter(Boolean);
+        const kept = entries.filter(entry => !deletedPathKeys.has(pathKey(path.resolve(combined, entry))));
+        if (kept.length === entries.length) continue;
+        if (kept.length) {
+            await buildVrtWithStyle(combined, kept, vrtName, 'ALL_MARKHOJD');
+        } else {
+            for (const file of [vrtName, `${vrtName}.aux.xml`, listName, vrtName.replace(/\.vrt$/, '.qml')]) {
+                fs.rmSync(path.join(combined, file), { force: true });
+            }
+        }
+        changed.push(path.join(combined, vrtName));
+    }
+    return changed;
+}
+
+async function removeRasterTiles(folderName, filenames) {
+    const folder = path.join(__dirname, folderName);
+    const collectionId = folderName.replace(/^LMV_DOWNLOADS_/, '');
+    const manifest = loadManifest(folder, collectionId);
+    const targets = [...new Set(filenames)].filter(name => typeof name === 'string' && path.basename(name) === name && manifest.tiles[name]);
+    if (!targets.length) return { removed: 0, remaining: Object.keys(manifest.tiles).length };
+    for (const name of targets) {
+        for (const suffix of ['', '.aux.xml', '.ovr']) {
+            fs.rmSync(path.join(folder, name + suffix), { force: true, maxRetries: 5, retryDelay: 200 });
+        }
+        delete manifest.tiles[name];
+    }
+    saveManifest(folder, manifest);
+    writeTileIndexFile(folder, collectionId, manifestTileFeatures(manifest));
+    const remaining = Object.keys(manifest.tiles).sort();
+    if (remaining.length) {
+        await buildVrtWithStyle(folder, remaining, 'index.vrt', collectionId);
+        refreshPublishedRasterCatalogs(folderName);
+    } else {
+        for (const file of ['index.vrt', 'index.vrt.aux.xml', 'index.qml', 'index_filelist.txt']) fs.rmSync(path.join(folder, file), { force: true });
+        const catalogs = loadPublishedCatalogs();
+        const aliases = Object.keys(catalogs).filter(alias => catalogs[alias].folderName === folderName);
+        if (aliases.length) removePublishedCatalogs(catalogs, aliases);
+    }
+    const changedCombined = await refreshCombinedVrts(new Set(targets.map(name => pathKey(path.join(folder, name)))));
+    if (changedCombined.length) rotateCatalogCaches(changedCombined);
+    writeToLog(`[TILES] ${targets.length} raster raderade från ${folderName}; ${remaining.length} kvar.`);
+    return { removed: targets.length, remaining: remaining.length };
+}
+
+function requireAdminRole(req, res, next) {
+    if (req.authUser?.role !== 'admin') return res.status(403).json({ success: false, error: 'Endast administratörer.' });
+    next();
+}
+
+function resolveLmvCredentials(input = {}) {
+    const text = value => typeof value === 'string' ? value.trim() : '';
+    const apiKey = text(input.apiKey);
+    const apiToken = text(input.apiToken);
+    if (apiKey || apiToken) return { apiUsername: text(input.apiUsername) || undefined, apiKey: apiKey || undefined, apiToken: apiToken || undefined, saved: false };
+    let account = null;
+    try { account = readLmvAccount(); } catch (error) { writeToLog(`[LMV] Sparat konto kunde inte läsas: ${error.message}`); }
+    if (!account) return null;
+    return account.authType === 'token'
+        ? { apiUsername: undefined, apiKey: undefined, apiToken: account.apiToken, saved: true }
+        : { apiUsername: account.username, apiKey: account.apiKey, apiToken: undefined, saved: true };
 }
 
 function buildDynamicQml(minVal, maxVal, step = 5) {
@@ -1215,8 +1384,13 @@ app.get('/lmv/collections', async (req, res) => {
 // NUEVA Ruta para Höjd (usada por lmv_hojd.html)
 app.get('/lmv/hojd/collections', async (req, res) => {
     try {
-        const apiKey = req.headers['x-api-key'];
-        const authHeader = req.headers['authorization'];
+        let apiKey = req.headers['x-api-key'];
+        let authHeader = req.headers['authorization'];
+        if (!apiKey && !authHeader) {
+            const saved = resolveLmvCredentials({});
+            if (saved?.apiKey) apiKey = saved.apiKey;
+            if (saved?.apiToken) authHeader = `Bearer ${saved.apiToken}`;
+        }
         if (!apiKey && !authHeader) {
             return res.status(401).json({ success: false, error: 'API Key requerida en el header X-API-Key o Authorization: Bearer <token>' });
         }
@@ -1232,6 +1406,28 @@ app.get('/lmv/hojd/collections', async (req, res) => {
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
+});
+
+app.get('/lmv/account', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, account: lmvAccountSummary() });
+});
+
+app.put('/admin/lmv-account', requireAdminRole, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+        const account = saveLmvAccount(req.body || {});
+        writeToLog(`[LMV] Sparat LMV-konto uppdaterat av ${req.authUser.username}.`);
+        res.json({ success: true, account });
+    } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
+app.delete('/admin/lmv-account', requireAdminRole, (req, res) => {
+    deleteLmvAccount();
+    writeToLog(`[LMV] Sparat LMV-konto raderat av ${req.authUser.username}.`);
+    res.json({ success: true, account: { configured: false } });
 });
 
 app.get('/lmv/lan', (req, res) => {
@@ -1585,16 +1781,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
 
     // Raster tile index covers every tile in the shared folder, not only this area.
     if (manifest) {
-        tileIndexFeatures = Object.values(manifest.tiles)
-            .filter(t => Array.isArray(t.bbox) && t.bbox.length === 4)
-            .map(t => {
-                const [minx, miny, maxx, maxy] = t.bbox;
-                return {
-                    type: 'Feature',
-                    properties: { id: t.id, filename: t.filename, location: `./${t.filename}` },
-                    geometry: { type: 'Polygon', coordinates: [[[minx, miny], [maxx, miny], [maxx, maxy], [minx, maxy], [minx, miny]]] }
-                };
-            });
+        tileIndexFeatures = manifestTileFeatures(manifest);
     }
 
     // CAMBIO 4: Generar archivo tile_index.geojson
@@ -1716,13 +1903,14 @@ function jobUsingFolder(folderName) {
 
 // --- RUTA DE INICIO DE DESCARGA ---
 app.post('/lmv/start-full-download', downloadLimiter, async (req, res) => {
-    const { apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel } = req.body;
+    const { collectionId, apiType, geometry, geometryLabel } = req.body;
 
     // Standardvärde: om apiType saknas används 'vektor' (bakåtkompatibilitet)
     const type = apiType || 'vektor';
 
-    // Accept either apiKey or apiToken when using token-based auth
-    if (!(apiKey || apiToken) || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
+    const credentials = resolveLmvCredentials(req.body);
+    if (!credentials || !collectionId) return res.status(400).json({ success: false, error: 'Saknas LMV-uppgifter eller samling.' });
+    const { apiKey, apiUsername, apiToken } = credentials;
 
     // Validar credenciales antes de iniciar cualquier proceso en background
     try {
@@ -1865,6 +2053,7 @@ app.post('/lmv/cancel-download', (req, res) => {
 app.get('/lmv/downloads/list', (req, res) => {
     try {
         const entries = fs.readdirSync(__dirname, { withFileTypes: true });
+        const meta = loadDownloadMeta();
         const downloads = entries
             .filter(entry => entry.isDirectory() && entry.name.startsWith('LMV_DOWNLOADS_'))
             .map(entry => {
@@ -1887,9 +2076,12 @@ app.get('/lmv/downloads/list', (req, res) => {
                 const hasVrt = files.some(f => f.endsWith('.vrt'));
                 const hasTileIndex = files.includes('tile_index.geojson');
                 const tifCount = files.filter(f => f.toLowerCase().endsWith('.tif') || f.toLowerCase().endsWith('.tiff')).length;
+                const info = meta[entry.name] || {};
                 
                 return {
                     name: entry.name,
+                    displayName: info.displayName || '',
+                    description: info.description || '',
                     created: stats.birthtime,
                     modified: stats.mtime,
                     size: totalSize,
@@ -1964,6 +2156,7 @@ app.post('/terrain/publish', (req, res) => {
     if ([...publicationJobs.values()].some(job => job.folderName === folderName && job.status === 'running')) return res.status(409).json({ success: false, error: 'Mappen publiceras redan.' });
     const normalizedAlias = normalizeCatalogAlias(alias || String(folderName || '').replace(/^LMV_DOWNLOADS_/, ''));
     if (activePublications.has(normalizedAlias)) return res.status(409).json({ success: false, error: 'Katalogen publiceras redan.' });
+    if (rasterMaintenance.has(folderName)) return res.status(409).json({ success: false, error: 'Raster tas bort i mappen. Försök igen strax.' });
 
     const id = randomUUID();
     const job = { id, folderName, alias: normalizedAlias, status: 'running', startedAt: new Date().toISOString() };
@@ -2041,6 +2234,18 @@ app.get('/terrain/:catalog/config/:kind', (req, res) => {
     res.status(400).json({ success: false, error: 'Okänt format. Använd hajk eller origo.' });
 });
 
+app.get('/terrain/:catalog/api-key', (req, res) => {
+    const catalog = loadPublishedCatalogs()[normalizeCatalogAlias(req.params.catalog)];
+    res.setHeader('Cache-Control', 'no-store');
+    if (!catalog) return res.status(404).json({ success: false, error: 'Katalog hittades inte' });
+    if (!catalog.apiKeyEncrypted) return res.status(404).json({ success: false, error: 'Nyckeln är inte sparad. Skapa en ny API-nyckel.' });
+    try {
+        res.json({ success: true, apiKey: decryptSecret(catalog.apiKeyEncrypted) });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Nyckeln kunde inte läsas. Skapa en ny API-nyckel.' });
+    }
+});
+
 app.get('/terrain/:catalog/tiles/:z/:x/:y.png', async (req, res, next) => {
     const catalog = loadPublishedCatalogs()[normalizeCatalogAlias(req.params.catalog)];
     if (!catalog) return res.sendStatus(404);
@@ -2114,6 +2319,74 @@ app.delete('/terrain/:catalog', (req, res) => {
     }
 });
 
+app.patch('/lmv/downloads/:folderName/meta', (req, res) => {
+    const folderName = req.params.folderName;
+    if (!downloadFolderPath(folderName)) return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
+    const { displayName = '', description = '' } = req.body || {};
+    if (typeof displayName !== 'string' || typeof description !== 'string' || displayName.trim().length > 100 || description.trim().length > 2000) {
+        return res.status(400).json({ success: false, error: 'Namn högst 100 tecken, beskrivning högst 2000 tecken.' });
+    }
+    const meta = loadDownloadMeta();
+    const name = displayName.trim();
+    const text = description.trim();
+    if (name || text) meta[folderName] = { displayName: name, description: text, updatedAt: new Date().toISOString(), updatedBy: req.authUser.username };
+    else delete meta[folderName];
+    saveDownloadMeta(meta);
+    res.json({ success: true, displayName: name, description: text });
+});
+
+app.get('/lmv/downloads/:folderName/tiles', async (req, res) => {
+    const folderName = req.params.folderName;
+    const folder = downloadFolderPath(folderName);
+    if (!folder) return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
+    try {
+        const manifest = loadManifest(folder, folderName.replace(/^LMV_DOWNLOADS_/, ''));
+        const missing = Object.values(manifest.tiles).filter(tile => !(Array.isArray(tile.bbox) && tile.bbox.length === 4));
+        for (let index = 0; index < missing.length; index += 4) {
+            await Promise.all(missing.slice(index, index + 4).map(async tile => {
+                const bbox = await rasterWgs84Bbox(path.join(folder, tile.filename));
+                if (bbox) tile.bbox = bbox;
+            }));
+        }
+        if (missing.length && !jobUsingFolder(folderName) && !rasterMaintenance.has(folderName)) saveManifest(folder, manifest);
+        const features = manifestTileFeatures(manifest).map(feature => {
+            let size = 0;
+            try { size = fs.statSync(path.join(folder, feature.properties.filename)).size; } catch (error) {}
+            return { ...feature, properties: { ...feature.properties, size } };
+        });
+        res.json({
+            success: true,
+            type: 'FeatureCollection',
+            features,
+            withoutExtent: Object.keys(manifest.tiles).length - features.length,
+            locked: Boolean(jobUsingFolder(folderName) || rasterMaintenance.has(folderName))
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/lmv/downloads/:folderName/tiles/delete', requireAdminRole, async (req, res) => {
+    const folderName = req.params.folderName;
+    if (!downloadFolderPath(folderName)) return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
+    const filenames = req.body?.filenames;
+    if (!Array.isArray(filenames) || !filenames.length || filenames.length > 10000) return res.status(400).json({ success: false, error: 'Välj minst ett raster.' });
+    if (jobUsingFolder(folderName) || jobUsingFolder(COMBINED_HOJD_FOLDER)) return res.status(409).json({ success: false, error: 'En nedladdning använder mappen. Vänta tills den är klar.' });
+    if (rasterMaintenance.has(folderName) || [...publicationJobs.values()].some(job => job.folderName === folderName && job.status === 'running')) {
+        return res.status(409).json({ success: false, error: 'Mappen bearbetas redan. Försök igen strax.' });
+    }
+    rasterMaintenance.add(folderName);
+    try {
+        const result = await removeRasterTiles(folderName, filenames);
+        res.json({ success: true, ...result });
+    } catch (error) {
+        writeToLog(`[TILES] Radering misslyckades i ${folderName}: ${error.message}`);
+        res.status(500).json({ success: false, error: error.message });
+    } finally {
+        rasterMaintenance.delete(folderName);
+    }
+});
+
 app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
     if (req.authUser.role !== 'admin') return res.status(403).json({ success: false, error: 'Endast administratörer får ta bort nedladdningar.' });
     const folderName = req.params.folderName;
@@ -2136,7 +2409,14 @@ app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
         const catalogs = loadPublishedCatalogs();
         const aliases = Object.keys(catalogs).filter(alias => catalogs[alias].folderName === folderName);
         if (aliases.length) removePublishedCatalogs(catalogs, aliases);
+        const deletedRasters = folderName === COMBINED_HOJD_FOLDER ? [] : fs.readdirSync(folderPath)
+            .filter(file => /\.tiff?$/i.test(file))
+            .map(file => pathKey(path.join(folderPath, file)));
         fs.rmSync(folderPath, { recursive: true, force: true });
+        removeDownloadMeta(folderName);
+        refreshCombinedVrts(new Set(deletedRasters))
+            .then(changed => { if (changed.length) rotateCatalogCaches(changed); })
+            .catch(error => writeToLog(`[DELETE] Kunde inte uppdatera kombinerade VRT: ${error.message}`));
         writeToLog(`[DELETE] Mapp raderad: ${folderName}`);
         res.json({ success: true, message: 'Mappen raderades' });
     } catch (error) {
@@ -2152,10 +2432,11 @@ app.listen(port, process.env.HOST || '127.0.0.1', () => {
 });
 // Endpoint para validar LMV-uppgifter rápidamente desde el cliente
 app.post('/lmv/validate', async (req, res) => {
-    const { apiKey, apiUsername, apiToken, collectionId, apiType } = req.body;
+    const { collectionId, apiType } = req.body;
     const type = apiType || 'vektor';
-    // Accept either apiKey or apiToken
-    if (!(apiKey || apiToken) || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
+    const credentials = resolveLmvCredentials(req.body);
+    if (!credentials || !collectionId) return res.status(400).json({ success: false, error: 'Saknas LMV-uppgifter eller samling.' });
+    const { apiKey, apiUsername, apiToken } = credentials;
 
     try {
         const valid = await validateLmvCredentials(apiUsername, apiKey, apiToken, type, collectionId);
@@ -2179,10 +2460,13 @@ app.patch('/terrain/:catalog/access', (req, res) => {
     if (activePublications.has(alias)) return res.status(409).json({ error: 'Publication in progress' });
     const { isPublic, rotateKey } = req.body || {};
     if (typeof isPublic !== 'boolean' || (rotateKey !== undefined && typeof rotateKey !== 'boolean')) return res.status(400).json({ error: 'Invalid access settings' });
-    const changedToPrivate = catalog.isPublic !== false && !isPublic;
-    const generated = !isPublic && (changedToPrivate || rotateKey || !catalog.apiKeyHash) ? newServiceKey() : null;
+    // The existing key survives public/private toggles; only an explicit rotation replaces it.
+    const generated = !isPublic && (rotateKey || !catalog.apiKeyHash) ? newServiceKey() : null;
     catalog.isPublic = isPublic;
-    if (generated) catalog.apiKeyHash = generated.hash;
+    if (generated) {
+        catalog.apiKeyHash = generated.hash;
+        catalog.apiKeyEncrypted = generated.encrypted;
+    }
     catalog.updatedAt = new Date().toISOString();
     savePublishedCatalogs(catalogs);
     res.setHeader('Cache-Control', 'no-store');

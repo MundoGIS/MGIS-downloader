@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Användare | MGIS</title>
+    <title>Administration | MGIS</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body class="admin-page">
@@ -21,6 +21,19 @@
         </section>
         <section><h2>Konton</h2><ul id="users"></ul></section>
         <p id="message" role="status"></p>
+        <section>
+            <h2>Sparat LMV-konto</h2>
+            <p class="lmv-status" id="lmvStatus">Läser...</p>
+            <form id="lmvForm" autocomplete="off">
+                <label>Metod<select name="authType"><option value="userpass">Användarnamn + API-nyckel</option><option value="token">Auth token (Bearer)</option></select></label>
+                <label data-auth="userpass">LMV-användarnamn<input name="username" autocomplete="off"></label>
+                <label data-auth="userpass">API-nyckel<input name="apiKey" type="password" autocomplete="new-password" placeholder="Lämna tomt för att behålla"></label>
+                <label data-auth="token" hidden>Token<input name="apiToken" type="password" autocomplete="new-password" placeholder="Lämna tomt för att behålla"></label>
+                <button type="submit">Spara konto</button>
+                <button type="button" class="delete" id="lmvDelete" hidden>Ta bort konto</button>
+            </form>
+            <p id="lmvMessage" role="status"></p>
+        </section>
     </main>
     <script>
         const message = document.getElementById('message');
@@ -73,6 +86,58 @@
             } catch (error) { message.textContent = error.message; }
         });
         loadUsers();
+
+        const lmvForm = document.getElementById('lmvForm');
+        const lmvMessage = document.getElementById('lmvMessage');
+        function showAuthFields() {
+            for (const label of lmvForm.querySelectorAll('[data-auth]')) label.hidden = label.dataset.auth !== lmvForm.elements.authType.value;
+        }
+        async function loadLmvAccount() {
+            try {
+                const { account } = await request('/lmv/account');
+                const status = document.getElementById('lmvStatus');
+                document.getElementById('lmvDelete').hidden = !account.configured;
+                if (account.configured) {
+                    status.textContent = account.authType === 'token'
+                        ? 'Ett token är sparat. Användarna behöver inte ange LMV-uppgifter.'
+                        : `Kontot "${account.username}" är sparat. Användarna behöver inte ange LMV-uppgifter.`;
+                    lmvForm.elements.authType.value = account.authType;
+                    lmvForm.elements.username.value = account.username || '';
+                } else {
+                    status.textContent = account.error || 'Inget konto sparat. Användarna anger LMV-uppgifter manuellt.';
+                }
+                lmvForm.elements.apiKey.value = '';
+                lmvForm.elements.apiToken.value = '';
+                showAuthFields();
+            } catch (error) { lmvMessage.textContent = error.message; }
+        }
+        lmvForm.elements.authType.addEventListener('change', showAuthFields);
+        lmvForm.addEventListener('submit', async event => {
+            event.preventDefault();
+            try {
+                await request('/admin/lmv-account', {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        authType: lmvForm.elements.authType.value,
+                        username: lmvForm.elements.username.value,
+                        apiKey: lmvForm.elements.apiKey.value,
+                        apiToken: lmvForm.elements.apiToken.value
+                    })
+                });
+                lmvMessage.textContent = 'LMV-kontot sparades.';
+            } catch (error) { lmvMessage.textContent = error.message; }
+            await loadLmvAccount();
+        });
+        document.getElementById('lmvDelete').addEventListener('click', async () => {
+            if (!confirm('Ta bort det sparade LMV-kontot? Användarna måste då ange uppgifterna manuellt.')) return;
+            try {
+                await request('/admin/lmv-account', { method: 'DELETE' });
+                lmvForm.reset();
+                lmvMessage.textContent = 'LMV-kontot togs bort.';
+            } catch (error) { lmvMessage.textContent = error.message; }
+            await loadLmvAccount();
+        });
+        loadLmvAccount();
     </script>
     <script src="auth-nav.js" defer></script>
 </body>

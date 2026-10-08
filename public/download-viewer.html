@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rutor i nedladdning | MGIS</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="downloads-page">
+    <div id="site-header"></div>
+    <div class="container viewer-page">
+        <div class="viewer-heading">
+            <div>
+                <a href="downloads.html">← Nedladdningar</a>
+                <h1 id="viewerTitle">Rutor</h1>
+                <p id="viewerSubtitle" class="download-folder"></p>
+            </div>
+        </div>
+        <div class="viewer-toolbar">
+            <span id="viewerStats">Laddar rutor...</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="selectAllBtn">Markera alla</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="clearSelectionBtn">Rensa urval</button>
+            <button type="button" class="btn btn-danger btn-sm" id="deleteSelectedBtn" hidden disabled>🗑️ Ta bort valda</button>
+        </div>
+        <p class="viewer-help">Klicka på en ruta för att markera den, eller rita en rektangel (verktyget uppe till vänster) för att markera flera. Den publicerade XYZ-tjänsten visas under rutorna.</p>
+        <p id="viewerMessage" role="status"></p>
+        <div id="viewerMap"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <script>
+        const folder = new URLSearchParams(location.search).get('folder') || '';
+        const message = document.getElementById('viewerMessage');
+        const statsText = document.getElementById('viewerStats');
+        const deleteBtn = document.getElementById('deleteSelectedBtn');
+        const selected = new Set();
+        const tileLayers = new Map();
+        let isAdmin = false;
+        let locked = false;
+        let tilesLayer = null;
+        let xyzLayer = null;
+        let firstLoad = true;
+
+        const map = L.map('viewerMap').setView([62, 15], 5);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap'
+        }).addTo(map);
+        const layerControl = L.control.layers({}, {}).addTo(map);
+        const drawn = new L.FeatureGroup().addTo(map);
+        map.addControl(new L.Control.Draw({
+            draw: { polygon: false, polyline: false, circle: false, marker: false, circlemarker: false, rectangle: { shapeOptions: { color: '#d9534f' } } },
+            edit: false
+        }));
+        map.on(L.Draw.Event.CREATED, event => {
+            const bounds = event.layer.getBounds();
+            for (const [name, layer] of tileLayers) {
+                if (bounds.intersects(layer.getBounds())) selected.add(name);
+            }
+            drawn.clearLayers();
+            refreshSelection();
+        });
+
+        function formatBytes(bytes) {
+            if (!bytes) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+            return `${(bytes / 1024 ** index).toFixed(1)} ${units[index]}`;
+        }
+
+        function tileStyle(name) {
+            return selected.has(name)
+                ? { color: '#b13331', weight: 2, fillColor: '#d9534f', fillOpacity: 0.45 }
+                : { color: '#1f6fd1', weight: 1, fillColor: '#1f6fd1', fillOpacity: 0.08 };
+        }
+
+        function refreshSelection() {
+            let size = 0;
+            for (const [name, layer] of tileLayers) {
+                layer.setStyle(tileStyle(name));
+                if (selected.has(name)) size += layer.feature.properties.size || 0;
+            }
+            statsText.textContent = `${tileLayers.size} rutor · ${selected.size} valda (${formatBytes(size)})`;
+            deleteBtn.textContent = `🗑️ Ta bort valda (${selected.size})`;
+            deleteBtn.disabled = !selected.size || locked;
+        }
+
+        async function catalogOverlay() {
+            const response = await fetch('/terrain/catalogs');
+            const data = await response.json();
+            const catalog = (data.catalogs || []).find(item => item.folderName === folder);
+            if (!catalog) return null;
+            let url = `/terrain/${encodeURIComponent(catalog.alias)}/tiles/{z}/{x}/{y}.png?v=${Date.now()}`;
+            if (catalog.isPublic === false) {
+                const keyResponse = await fetch(`/terrain/${encodeURIComponent(catalog.alias)}/api-key`);
+                const keyData = await keyResponse.json();
+                if (!keyResponse.ok || !keyData.apiKey) return null;
+                url += `&api_key=${encodeURIComponent(keyData.apiKey)}`;
+            }
+            return { title: catalog.title, layer: L.tileLayer(url, { maxZoom: 22, opacity: 0.85 }) };
+        }
+
+        async function load() {
+            message.textContent = '';
+            try {
+                const [meResponse, listResponse, tilesResponse] = await Promise.all([
+                    fetch('/auth/me'),
+                    fetch('/lmv/downloads/list'),
+                    fetch(`/lmv/downloads/${encodeURIComponent(folder)}/tiles`)
+                ]);
+                isAdmin = meResponse.ok && (await meResponse.json()).user?.role === 'admin';
+                const download = ((await listResponse.json()).downloads || []).find(item => item.name === folder);
+                document.getElementById('viewerTitle').textContent = download?.displayName || folder;
+                document.getElementById('viewerSubtitle').textContent = download?.displayName ? folder : (download?.description || '');
+                const data = await tilesResponse.json();
+                if (!tilesResponse.ok || !data.success) throw new Error(data.error || 'Kunde inte läsa rutor.');
+                locked = data.locked;
+                deleteBtn.hidden = !isAdmin;
+
+                if (xyzLayer) { layerControl.removeLayer(xyzLayer); map.removeLayer(xyzLayer); xyzLayer = null; }
+                const overlay = await catalogOverlay();
+                if (overlay) {
+                    xyzLayer = overlay.layer.addTo(map);
+                    layerControl.addOverlay(xyzLayer, `XYZ: ${overlay.title}`);
+                }
+
+                if (tilesLayer) { layerControl.removeLayer(tilesLayer); map.removeLayer(tilesLayer); }
+                tileLayers.clear();
+                selected.clear();
+                tilesLayer = L.geoJSON(data, {
+                    style: feature => tileStyle(feature.properties.filename),
+                    onEachFeature: (feature, layer) => {
+                        const name = feature.properties.filename;
+                        tileLayers.set(name, layer);
+                        layer.bindTooltip(`${name} · ${formatBytes(feature.properties.size)}`);
+                        layer.on('click', () => {
+                            if (selected.has(name)) selected.delete(name); else selected.add(name);
+                            refreshSelection();
+                        });
+                    }
+                }).addTo(map);
+                layerControl.addOverlay(tilesLayer, 'Rutor (TIF)');
+                if (firstLoad && tileLayers.size) map.fitBounds(tilesLayer.getBounds().pad(0.1));
+                firstLoad = false;
+                if (data.withoutExtent) message.textContent = `${data.withoutExtent} raster saknar känd utbredning och visas inte.`;
+                if (locked) message.textContent = 'Mappen används av en pågående nedladdning eller bearbetning. Radering är spärrad tills den är klar.';
+                refreshSelection();
+            } catch (error) {
+                message.textContent = error.message;
+                statsText.textContent = '';
+            }
+        }
+
+        document.getElementById('selectAllBtn').addEventListener('click', () => {
+            for (const name of tileLayers.keys()) selected.add(name);
+            refreshSelection();
+        });
+        document.getElementById('clearSelectionBtn').addEventListener('click', () => {
+            selected.clear();
+            refreshSelection();
+        });
+        deleteBtn.addEventListener('click', async () => {
+            const names = [...selected];
+            if (!names.length) return;
+            const all = names.length === tileLayers.size;
+            const warning = all ? '\n\nAlla rutor väljs: publicerade XYZ-kataloger för mappen avpubliceras.' : '';
+            if (!confirm(`Ta bort ${names.length} raster från servern? VRT och XYZ byggs om automatiskt.${warning}\n\nDetta går inte att ångra.`)) return;
+            deleteBtn.disabled = true;
+            message.textContent = 'Tar bort raster och bygger om VRT...';
+            try {
+                const response = await fetch(`/lmv/downloads/${encodeURIComponent(folder)}/tiles/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames: names })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || 'Radering misslyckades.');
+                selected.clear();
+                await load();
+                message.textContent = `${data.removed} raster borttagna. ${data.remaining} kvar; VRT och XYZ är uppdaterade.`;
+            } catch (error) {
+                message.textContent = error.message;
+                refreshSelection();
+            }
+        });
+
+        if (!/^LMV_DOWNLOADS_[a-zA-Z0-9_-]+$/.test(folder)) message.textContent = 'Ogiltig mapp.';
+        else load();
+    </script>
+    <script src="auth-nav.js" defer></script>
+</body>
+</html>
