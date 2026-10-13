@@ -13,7 +13,7 @@ const rememberedLifetime = 30 * 24 * 60 * 60 * 1000;
 function readRemembered() {
     if (!fs.existsSync(rememberedPath)) return {};
     const records = JSON.parse(fs.readFileSync(rememberedPath, 'utf8'));
-    if (!records || Array.isArray(records) || typeof records !== 'object') throw new Error('Invalid session store');
+    if (!records || Array.isArray(records) || typeof records !== 'object') throw new Error('Ogiltigt sessionsregister.');
     return records;
 }
 
@@ -32,7 +32,7 @@ function writeRemembered(records) {
 function readUsers() {
     if (!fs.existsSync(storePath)) return [];
     const users = JSON.parse(fs.readFileSync(storePath, 'utf8'));
-    if (!Array.isArray(users)) throw new Error('Invalid users file');
+    if (!Array.isArray(users)) throw new Error('Ogiltig användarfil.');
     return users;
 }
 
@@ -61,8 +61,8 @@ function validPassword(password) {
 }
 
 function createInitialAdmin(username, password) {
-    if (!validUsername(username) || !validPassword(password)) throw new Error('Use a 3-40 character username and a password of at least 6 characters (max 72 UTF-8 bytes).');
-    if (readUsers().length) throw new Error('Users already exist; create more users from the admin page.');
+    if (!validUsername(username) || !validPassword(password)) throw new Error('Ange ett användarnamn med 3–40 tecken och ett lösenord med minst 6 tecken (högst 72 UTF-8-byte).');
+    if (readUsers().length) throw new Error('Användare finns redan. Skapa fler konton i administrationspanelen.');
     const user = { id: crypto.randomUUID(), username, role: 'admin', hash: bcrypt.hashSync(password, 12) };
     writeUsers([user]);
     return publicUser(user);
@@ -113,22 +113,22 @@ function installAuth(app, { getCatalog = () => null } = {}) {
     }
 
     function requireAdmin(req, res, next) {
-        if (req.authUser.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+        if (req.authUser.role !== 'admin') return res.status(403).json({ error: 'Administratörsbehörighet krävs.' });
         next();
     }
 
     app.post('/auth/login', async (req, res) => {
-        if (!transportAllowed(req)) return res.status(403).json({ error: 'HTTPS required' });
-        if (!validOrigin(req)) return res.status(403).json({ error: 'Invalid request origin' });
+        if (!transportAllowed(req)) return res.status(403).json({ error: 'HTTPS krävs.' });
+        if (!validOrigin(req)) return res.status(403).json({ error: 'Otillåtet ursprung för begäran.' });
         const address = req.ip;
         const record = attempts.get(address) || { count: 0, until: 0 };
-        if (record.until > Date.now() && record.count >= 5) return res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        if (record.until > Date.now() && record.count >= 5) return res.status(429).json({ error: 'För många försök. Försök igen senare.' });
         const { username, password, remember } = req.body || {};
         const user = typeof username === 'string' ? readUsers().find(item => item.username.toLowerCase() === username.toLowerCase()) : null;
         const matches = await bcrypt.compare(validPassword(password) ? password : '', user ? user.hash : '$2b$12$3BgsZ71mqxC3DqRVud1Z9.O68dHd2mY91dpClL0qDJNUZjF6Db0Iu');
         if (!user || !matches) {
             attempts.set(address, { count: record.until > Date.now() ? record.count + 1 : 1, until: record.until > Date.now() ? record.until : Date.now() + 15 * 60 * 1000 });
-            return res.status(401).json({ error: 'Invalid username or password' });
+            return res.status(401).json({ error: 'Fel användarnamn eller lösenord.' });
         }
         attempts.delete(address);
         const previous = tokenFromRequest(req);
@@ -159,18 +159,18 @@ function installAuth(app, { getCatalog = () => null } = {}) {
 
     app.use((req, res, next) => {
         if (!transportAllowed(req)) {
-            return res.status(403).json({ error: 'HTTPS required' });
+            return res.status(403).json({ error: 'HTTPS krävs.' });
         }
         const tile = ['GET', 'HEAD'].includes(req.method) && req.path.match(/^\/terrain\/([a-z0-9_-]+)\/tiles\/\d+\/\d+\/\d+\.png$/);
         if (tile) {
             const catalog = getCatalog(tile[1]);
-            if (!catalog) return res.status(404).json({ error: 'Catalog not found' });
+            if (!catalog) return res.status(404).json({ error: 'Katalogen hittades inte.' });
             if (catalog.isPublic !== false) return next();
             const submitted = req.get('x-api-key') || req.query.api_key;
-            if (typeof submitted !== 'string' || !/^[a-f0-9]{64}$/.test(submitted)) return res.status(401).json({ error: 'API key required' });
+            if (typeof submitted !== 'string' || !/^[a-f0-9]{64}$/.test(submitted)) return res.status(401).json({ error: 'API-nyckel krävs.' });
             const submittedHash = crypto.createHash('sha256').update(submitted).digest();
             const expectedHash = /^[a-f0-9]{64}$/.test(catalog.apiKeyHash || '') ? Buffer.from(catalog.apiKeyHash, 'hex') : Buffer.alloc(32);
-            if (!crypto.timingSafeEqual(submittedHash, expectedHash)) return res.status(401).json({ error: 'Invalid API key' });
+            if (!crypto.timingSafeEqual(submittedHash, expectedHash)) return res.status(401).json({ error: 'Ogiltig API-nyckel.' });
             return next();
         }
         const user = currentUser(req);
@@ -178,11 +178,11 @@ function installAuth(app, { getCatalog = () => null } = {}) {
             if (req.method === 'GET' && (req.path === '/' || req.path.endsWith('.html') || req.get('accept')?.includes('text/html'))) {
                 return res.redirect(`/login.html?next=${encodeURIComponent(req.originalUrl)}`);
             }
-            return res.status(401).json({ error: 'Login required' });
+            return res.status(401).json({ error: 'Inloggning krävs.' });
         }
         req.authUser = user;
         if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
-            if (!validOrigin(req)) return res.status(403).json({ error: 'Invalid request origin' });
+            if (!validOrigin(req)) return res.status(403).json({ error: 'Otillåtet ursprung för begäran.' });
         }
         next();
     });
@@ -198,9 +198,9 @@ function installAuth(app, { getCatalog = () => null } = {}) {
     app.get('/admin/users', requireAdmin, (req, res) => res.json({ users: readUsers().map(publicUser) }));
     app.post('/admin/users', requireAdmin, (req, res) => {
         const { username, password, role } = req.body || {};
-        if (!validUsername(username) || !validPassword(password) || !['admin', 'user'].includes(role)) return res.status(400).json({ error: 'Invalid user data (password minimum 6 characters)' });
+        if (!validUsername(username) || !validPassword(password) || !['admin', 'user'].includes(role)) return res.status(400).json({ error: 'Ogiltiga användaruppgifter. Lösenordet måste ha minst 6 tecken.' });
         const users = readUsers();
-        if (users.some(item => item.username.toLowerCase() === username.toLowerCase())) return res.status(409).json({ error: 'Username exists' });
+        if (users.some(item => item.username.toLowerCase() === username.toLowerCase())) return res.status(409).json({ error: 'Användarnamnet finns redan.' });
         const user = { id: crypto.randomUUID(), username, role, hash: bcrypt.hashSync(password, 12) };
         users.push(user);
         writeUsers(users);
@@ -210,12 +210,12 @@ function installAuth(app, { getCatalog = () => null } = {}) {
         const { username, password, role } = req.body || {};
         const users = readUsers();
         const user = users.find(item => item.id === req.params.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        if (username !== undefined && !validUsername(username)) return res.status(400).json({ error: 'Username must have 3-40 letters, numbers, dots, underscores or hyphens' });
-        if (username !== undefined && users.some(item => item.id !== user.id && item.username.toLowerCase() === username.toLowerCase())) return res.status(409).json({ error: 'Username exists' });
-        if (role !== undefined && !['admin', 'user'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
-        if (password !== undefined && !validPassword(password)) return res.status(400).json({ error: 'Password minimum 6 characters' });
-        if (user.role === 'admin' && role === 'user' && users.filter(item => item.role === 'admin').length === 1) return res.status(409).json({ error: 'Last admin cannot be demoted' });
+        if (!user) return res.status(404).json({ error: 'Användaren hittades inte.' });
+        if (username !== undefined && !validUsername(username)) return res.status(400).json({ error: 'Användarnamnet måste ha 3–40 bokstäver, siffror, punkter, understreck eller bindestreck.' });
+        if (username !== undefined && users.some(item => item.id !== user.id && item.username.toLowerCase() === username.toLowerCase())) return res.status(409).json({ error: 'Användarnamnet finns redan.' });
+        if (role !== undefined && !['admin', 'user'].includes(role)) return res.status(400).json({ error: 'Ogiltig roll.' });
+        if (password !== undefined && !validPassword(password)) return res.status(400).json({ error: 'Lösenordet måste ha minst 6 tecken.' });
+        if (user.role === 'admin' && role === 'user' && users.filter(item => item.role === 'admin').length === 1) return res.status(409).json({ error: 'Den sista administratören kan inte ändras till användare.' });
         if (username !== undefined) user.username = username;
         if (role !== undefined) user.role = role;
         if (password !== undefined) user.hash = bcrypt.hashSync(password, 12);
@@ -225,9 +225,9 @@ function installAuth(app, { getCatalog = () => null } = {}) {
     app.delete('/admin/users/:id', requireAdmin, (req, res) => {
         const users = readUsers();
         const user = users.find(item => item.id === req.params.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        if (user.id === req.authUser.id) return res.status(409).json({ error: 'Cannot delete your own account' });
-        if (user.role === 'admin' && users.filter(item => item.role === 'admin').length === 1) return res.status(409).json({ error: 'Last admin cannot be deleted' });
+        if (!user) return res.status(404).json({ error: 'Användaren hittades inte.' });
+        if (user.id === req.authUser.id) return res.status(409).json({ error: 'Du kan inte ta bort ditt eget konto.' });
+        if (user.role === 'admin' && users.filter(item => item.role === 'admin').length === 1) return res.status(409).json({ error: 'Den sista administratören kan inte tas bort.' });
         writeUsers(users.filter(item => item.id !== user.id));
         res.json({ success: true });
     });

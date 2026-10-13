@@ -117,6 +117,25 @@ test('GDAL renders an XYZ tile and reuses the disk cache', { skip: !process.env.
         }
         assert.ok(transparentPixels > 0, 'outside-coverage pixels should be transparent');
         assert.ok(opaquePixels > 0, 'inside-coverage pixels should remain visible');
+
+        const themePixels = {};
+        for (const theme of ['red', 'green']) {
+            const style = { ...options.style, theme, minElevation: 0, maxElevation: 200 };
+            const tile = await renderer.render({ ...options, sourcePath: partialSourcePath, style });
+            const pixels = await sharp(tile).ensureAlpha().raw().toBuffer();
+            const center = (128 * 256 + 128) * 4;
+            themePixels[theme] = [...pixels.subarray(center, center + 4)];
+            assert.equal(pixels[3], 0, `${theme}: outside coverage must stay transparent`);
+            assert.equal(pixels[center + 3], 255, `${theme}: elevation must stay visible`);
+            assert.deepEqual(await renderer.render({ ...options, sourcePath: partialSourcePath, style }), tile);
+        }
+        assert.ok(themePixels.red[0] > themePixels.red[1], 'red elevation theme must contain red pixels');
+        assert.ok(themePixels.green[1] > themePixels.green[0], 'green elevation theme must contain green pixels');
+        assert.notDeepEqual(themePixels.red, themePixels.green);
+        const lighter = await renderer.render({ ...options, sourcePath: partialSourcePath,
+            style: { ...options.style, theme: 'red', minElevation: 0, maxElevation: 1000 } });
+        const lighterPixels = await sharp(lighter).ensureAlpha().raw().toBuffer();
+        assert.ok(lighterPixels[(128 * 256 + 128) * 4 + 1] > themePixels.red[1], 'changing the fixed range must change the cached colors');
     } finally {
         fs.rmSync(folder, { recursive: true, force: true });
     }

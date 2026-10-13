@@ -84,6 +84,7 @@
         const publicationMessages = new Map();
         const chosenResolutions = new Map();
         const chosenStyles = new Map();
+        const terrainThemes = { hillshade: 'Terrängskuggning', red: 'Röd höjdskala', green: 'Grön höjdskala' };
         const publishingFolders = new Set();
         const knownJobStatus = new Map();
         let firstJobsPoll = true;
@@ -160,7 +161,24 @@
             }
         }
         
-        function renderDownloads() {
+        let deferredDownloadsRender = false;
+        function downloadControlsInUse() {
+            const grid = document.getElementById('downloadsGrid');
+            return grid.contains(document.activeElement) && document.activeElement.matches('input, select, textarea');
+        }
+
+        document.getElementById('downloadsGrid').addEventListener('focusout', () => {
+            setTimeout(() => {
+                if (deferredDownloadsRender && !downloadControlsInUse()) renderDownloads();
+            }, 0);
+        });
+
+        function renderDownloads(force = false) {
+            if (!force && downloadControlsInUse()) {
+                deferredDownloadsRender = true;
+                return;
+            }
+            deferredDownloadsRender = false;
             const loadingState = document.getElementById('loadingState');
             const emptyState = document.getElementById('emptyState');
             const grid = document.getElementById('downloadsGrid');
@@ -226,27 +244,25 @@
                     </div>
                     ${published.map(catalog => `
                     <div class="published-catalog" style="margin:10px 0; min-width:0;">
-                        <strong>${escapeHtml(catalog.title)} (${escapeHtml(catalog.renderMode === 'ondemand' ? `XYZ bajo demanda, ${catalog.resolutionMeters === 'original' ? 'original' : 'máx. ' + catalog.resolutionMeters + ' m'}` : catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m')})</strong>
+                        <strong>${escapeHtml(catalog.title)} (${escapeHtml(catalog.renderMode === 'ondemand' ? `XYZ vid behov, ${catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m'}` : catalog.resolutionMeters === 'original' ? 'original' : catalog.resolutionMeters + ' m')})</strong>
+                        <span class="terrain-theme-label">${escapeHtml(terrainThemes[catalog.hillshadeStyle?.theme || 'hillshade'])}${catalog.hillshadeStyle?.theme && catalog.hillshadeStyle.theme !== 'hillshade' ? ` · ${escapeHtml(catalog.hillshadeStyle.minElevation ?? 0)}–${escapeHtml(catalog.hillshadeStyle.maxElevation ?? 1000)} m` : ''}</span>
                         <label style="display:inline-flex;align-items:center;gap:6px;margin:0 10px;">
                             <input type="checkbox" ${catalog.isPublic === false ? '' : 'checked'} onchange="setCatalogAccess('${escapeHtml(catalog.alias)}', this.checked)">
                             Public
                         </label>
                         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0;">
-                            <input type="text" readonly spellcheck="false" aria-label="XYZ URL para QGIS, Hajk y Origo" value="${escapeHtml(serviceTileUrl(catalog))}" onclick="this.select()" onfocus="this.select()" style="min-width:0;flex:1;padding:7px 9px;font-family:monospace;font-size:0.82em;">
+                            <input type="text" readonly spellcheck="false" aria-label="XYZ-adress för QGIS, Hajk och Origo" value="${escapeHtml(serviceTileUrl(catalog))}" onclick="this.select()" onfocus="this.select()" style="min-width:0;flex:1;padding:7px 9px;font-family:monospace;font-size:0.82em;">
                             <button type="button" class="btn btn-secondary btn-sm" title="Kopiera XYZ-länk" onclick="copyCatalogLink('${escapeHtml(catalog.alias)}')">Kopiera länk</button>
                             ${catalog.vrtPath ? `<button type="button" class="btn btn-secondary btn-sm" title="Kopiera sökvägen till VRT på servern" onclick="copyVrtPath('${escapeHtml(catalog.alias)}')">Kopiera VRT-sökväg</button>` : ''}
                             ${catalog.isPublic === false ? `<button type="button" class="btn btn-secondary btn-sm" title="Ogiltigförklara tidigare nyckel" onclick="rotateCatalogKey('${escapeHtml(catalog.alias)}')">Ny API-nyckel</button>` : ''}
                             <button type="button" class="btn btn-danger btn-sm" title="Ta bort publicerade karttiles" onclick="unpublishCatalog('${escapeHtml(catalog.alias)}')" ${cleanupSupported ? '' : 'disabled'}>Avpublicera</button>
                         </div>
-                        ${catalog.vrtPath ? `<small style="display:block;overflow-wrap:anywhere;margin-top:5px;">VRT local en el servidor: <code>${escapeHtml(catalog.vrtPath)}</code></small>` : ''}
+                        ${catalog.vrtPath ? `<small style="display:block;overflow-wrap:anywhere;margin-top:5px;">VRT på servern: <code>${escapeHtml(catalog.vrtPath)}</code></small>` : ''}
                     </div>`).join('')}
                     ${message ? `<p role="status" style="overflow-wrap:anywhere;">${escapeHtml(message)}</p>` : ''}
                     
                     <div class="download-actions">
-                        ${activeJob ? `
-                        <button class="btn btn-danger btn-sm" onclick="stopJob('${escapeHtml(activeJob.id)}')" ${activeJob.status === 'stopping' ? 'disabled' : ''}>
-                            ⏹ Stoppa nedladdning
-                        </button>` : ''}
+                        <div class="download-settings">
                         <label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8em;color:#444;">
                             <span>Upplösning XYZ</span>
                             <select id="resolution-${escapeHtml(download.name)}" onchange="chosenResolutions.set('${escapeHtml(download.name)}', this.value)" style="min-width:90px;padding:6px 8px;border-radius:6px;border:1px solid #ced4da;">
@@ -261,9 +277,29 @@
                             <span>Reliefstyrka</span>
                             <input type="number" min="0.5" max="3" step="0.1" value="${escapeHtml(style.strength)}" title="Högre värde ger mer markerad terräng (0,5-3)" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'strength', this.value)" style="width:65px;padding:6px;">
                         </label>
+                        <label class="terrain-theme-control">
+                            <span>Tema</span>
+                            <select onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'theme', this.value); renderDownloads(true)">
+                                ${Object.entries(terrainThemes).map(([value, label]) => `<option value="${value}" ${(style.theme || 'hillshade') === value ? 'selected' : ''}>${label}</option>`).join('')}
+                            </select>
+                        </label>
+                        ${style.theme && style.theme !== 'hillshade' ? `
+                        <label class="terrain-theme-control"><span>Minhöjd (m)</span>
+                            <input type="number" min="-12000" max="10000" step="any" value="${escapeHtml(style.minElevation ?? 0)}" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'minElevation', this.value)">
+                        </label>
+                        <label class="terrain-theme-control"><span>Maxhöjd (m)</span>
+                            <input type="number" min="-12000" max="10000" step="any" value="${escapeHtml(style.maxElevation ?? 1000)}" onchange="setHillshadeStyle('${escapeHtml(download.name)}', 'maxElevation', this.value)">
+                        </label>` : ''}
+                        </div>
+                        <div class="download-command-row">
+                        ${activeJob ? `
+                        <button class="btn btn-danger btn-sm" onclick="stopJob('${escapeHtml(activeJob.id)}')" ${activeJob.status === 'stopping' ? 'disabled' : ''}>
+                            ⏹ Stoppa nedladdning
+                        </button>` : ''}
                         <button class="btn btn-primary btn-sm ${publishing ? 'publish-pending' : ''}" onclick="publishCatalog('${escapeHtml(download.name)}', document.getElementById('resolution-${escapeHtml(download.name)}').value)" ${!cleanupSupported || activeJob || !(download.tifCount || download.hasVrt) || publishing ? 'disabled title="Vänta tills TIFF- eller VRT-filerna är klara"' : ''}>
                             ${publishing ? 'Publicerar...' : published.length ? 'Publicera om' : 'Publicera XYZ'}
                         </button>
+                        ${published.length ? `<button class="btn btn-secondary btn-sm" onclick="publishCatalog('${escapeHtml(download.name)}', document.getElementById('resolution-${escapeHtml(download.name)}').value, true)" ${activeJob || publishing ? 'disabled' : ''}>Publicera nytt tema</button>` : ''}
                         <button class="btn btn-success btn-sm" onclick="downloadFolder('${escapeHtml(download.name)}')" ${lock}>
                             ⬇️ Ladda ner ZIP
                         </button>
@@ -272,6 +308,7 @@
                         ${canDeleteDownloads ? `<button class="btn btn-danger btn-sm" onclick="deleteFolder('${escapeHtml(download.name)}')" ${!cleanupSupported || activeJob || publishing ? 'disabled' : ''}>
                             🗑️ Ta bort
                         </button>` : ''}
+                        </div>
                     </div>
                     ${!cleanupSupported ? '<p role="status">Starta om servern för att aktivera publicering och säker radering.</p>' : ''}
                 </div>
@@ -331,21 +368,35 @@
         function setHillshadeStyle(folderName, field, value) {
             const published = catalogs.find(catalog => catalog.folderName === folderName);
             const style = chosenStyles.get(folderName) || published?.hillshadeStyle || { altitude: 35, strength: 1.7 };
-            chosenStyles.set(folderName, { ...style, [field]: Number(value) });
+            chosenStyles.set(folderName, { ...style, [field]: field === 'theme' ? value : Number(value) });
         }
 
-        async function publishCatalog(folderName, resolutionOverride) {
+        async function publishCatalog(folderName, resolutionOverride, newCatalog = false) {
             if (sessionStorage.getItem('terrainPublishJob')) {
                 alert('En katalog publiceras redan i den här fliken.');
                 return;
             }
             const published = catalogs.find(catalog => catalog.folderName === folderName);
-            const alias = prompt('Ange alias för katalogen (får bara innehålla a-z, 0-9, bindestreck och underscore):', published?.alias || folderName.replace(/^LMV_DOWNLOADS_/, '').replace(/[^a-zA-Z0-9_-]+/g, '_').toLowerCase());
+            const selectedTheme = chosenStyles.get(folderName)?.theme || published?.hillshadeStyle?.theme || 'hillshade';
+            const baseAlias = published?.alias || folderName.replace(/^LMV_DOWNLOADS_/, '').replace(/[^a-zA-Z0-9_-]+/g, '_').toLowerCase();
+            const alias = prompt('Ange alias för katalogen (får bara innehålla a-z, 0-9, bindestreck och underscore):', newCatalog ? `${baseAlias}-${selectedTheme}` : baseAlias);
             if (!alias) return;
+            const normalizedAlias = alias.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'catalog';
+            if (newCatalog && catalogs.some(catalog => catalog.alias === normalizedAlias)) {
+                publicationMessages.set(folderName, 'Alias finns redan. Välj ett nytt alias för temat.');
+                renderDownloads();
+                return;
+            }
 
             const hillshadeStyle = chosenStyles.get(folderName) || published?.hillshadeStyle || { altitude: 35, strength: 1.7 };
             if (!Number.isFinite(hillshadeStyle.altitude) || hillshadeStyle.altitude < 15 || hillshadeStyle.altitude > 80 || !Number.isFinite(hillshadeStyle.strength) || hillshadeStyle.strength < 0.5 || hillshadeStyle.strength > 3) {
                 publicationMessages.set(folderName, 'Ljusvinkel: 15-80°, reliefstyrka: 0,5-3.');
+                renderDownloads();
+                return;
+            }
+            if (!Number.isFinite(Number(hillshadeStyle.minElevation ?? 0)) || !Number.isFinite(Number(hillshadeStyle.maxElevation ?? 1000)) ||
+                Number(hillshadeStyle.minElevation ?? 0) >= Number(hillshadeStyle.maxElevation ?? 1000)) {
+                publicationMessages.set(folderName, 'Minsta höjd måste vara lägre än största höjd.');
                 renderDownloads();
                 return;
             }
@@ -619,8 +670,6 @@
                     if (justFinished || (anyActive && Date.now() - lastFolderRefresh > 5000)) {
                         lastFolderRefresh = Date.now();
                         await loadDownloads();
-                    } else if (downloads.length) {
-                        renderDownloads();
                     }
                 }
             } catch (e) {

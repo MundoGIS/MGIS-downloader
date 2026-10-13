@@ -1200,6 +1200,10 @@ body.admin-page { background: #edf2f3; color: #193332; font: 16px/1.5 'Trebuchet
 /* Download names, descriptions and tile viewer */
 .download-folder { font-size: 0.8em; color: #6c757d; overflow-wrap: anywhere; }
 .download-description { margin: 6px 0 0; color: #444; white-space: pre-wrap; overflow-wrap: anywhere; }
+.terrain-theme-label { display: inline-block; margin: 6px 10px; font-size: 14px; color: #425b59; }
+.terrain-theme-control { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: #444; }
+.terrain-theme-control select, .terrain-theme-control input { padding: 6px 8px; border: 1px solid #ced4da; border-radius: 6px; width: auto; margin: 0; }
+.terrain-theme-control input { width: 96px; }
 .meta-dialog { border: 1px solid #cbd8d8; border-radius: 8px; padding: 20px; width: min(520px, 92vw); }
 .meta-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 .meta-dialog h2 { margin: 0 0 4px; font-size: 1.2em; }
@@ -1213,7 +1217,43 @@ body.admin-page { background: #edf2f3; color: #193332; font: 16px/1.5 'Trebuchet
 .viewer-toolbar #viewerStats { font-weight: 600; margin-right: auto; }
 .viewer-help { font-size: 0.85em; color: #555; margin: 0 0 6px; }
 #viewerMessage { min-height: 1.2em; margin: 0 0 8px; }
-#viewerMap { height: 70vh; min-height: 420px; border: 1px solid #dee2e6; border-radius: 8px; }
+#viewerMap { height: max(420px, 68vh); border: 1px solid #cbd8d8; border-radius: 6px; }
+.downloads-page .container.viewer-page { max-width: 1500px; padding: 24px; }
+.viewer-page .viewer-heading { margin-bottom: 20px; }
+.viewer-page .viewer-heading a { display: inline-block; margin-bottom: 8px; }
+.viewer-page .viewer-heading .download-folder { margin: 8px 0 0; }
+.viewer-page .viewer-toolbar { margin: 0 0 20px; padding: 16px 0; }
+.viewer-page #viewerMessage:empty { display: none; }
+.viewer-page #viewerMessage:not(:empty) { margin-bottom: 16px; }
+.viewer-heading h1 { font-size: 24px; overflow-wrap: anywhere; }
+.viewer-toolbar { border-block: 1px solid #cbd8d8; padding: 12px 0; gap: 10px; }
+.viewer-toolbar .btn { flex: 0 0 auto; width: auto; margin: 0; min-height: 38px; }
+.viewer-toolbar [hidden] { display: none !important; }
+.viewer-page #viewerStats { font-size: 14px; font-variant-numeric: tabular-nums; }
+.viewer-page .leaflet-control-layers { max-width: 240px; overflow-wrap: anywhere; }
+.viewer-page #viewerThemeControl { min-width: 0; max-width: 100%; }
+.viewer-page #viewerTheme { min-width: 0; max-width: 320px; flex: 1; }
+.downloads-page .download-actions { display: grid; gap: 16px; margin-top: 16px; }
+.downloads-page .download-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+.downloads-page .download-command-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 12px; border-top: 1px solid #e4e9ec; }
+.downloads-page .download-settings label { flex: 0 1 auto; margin: 0; }
+.downloads-page .download-settings input, .downloads-page .download-settings select { margin: 0; height: 38px; box-sizing: border-box; }
+.downloads-page .download-card .btn { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: auto; min-height: 38px; box-sizing: border-box; margin: 0; padding: 8px 12px; font-size: 13px; line-height: 20px; text-decoration: none; transition: background-color 0.15s; }
+.downloads-page .download-card .btn:hover { transform: none; box-shadow: none; }
+.downloads-page .download-card .btn-primary:hover { background: #5365cf; }
+.downloads-page .download-card .btn-secondary:hover { background: #59626a; }
+.downloads-page .download-card .btn-success:hover { background: #218838; }
+.downloads-page .download-card .btn-danger:hover { background: #bd2130; }
+.downloads-page .download-card { transition: none; }
+.downloads-page .download-card:hover { box-shadow: none; border-color: #dee2e6; }
+@media (max-width: 640px) {
+    .downloads-page .container.viewer-page { padding: 16px; }
+    .viewer-page #viewerThemeControl { width: 100%; }
+    .viewer-toolbar #viewerStats { flex-basis: 100%; }
+    .viewer-heading h1 { font-size: 20px; }
+    #viewerMap { height: 60vh; min-height: 340px; }
+    .viewer-toolbar .btn { font-size: 13px; padding: 8px; }
+}
 .lmv-saved-account { margin: 8px 0 12px; padding: 10px 12px; background: #e8f2ef; border-left: 4px solid #15766a; border-radius: 4px; }
 .lmv-saved-account label { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-weight: normal; }
 

@@ -20,11 +20,15 @@
         </div>
         <div class="viewer-toolbar">
             <span id="viewerStats">Laddar rutor...</span>
+            <label class="terrain-theme-control" id="viewerThemeControl" hidden>
+                <span>Karttema</span>
+                <select id="viewerTheme"></select>
+            </label>
             <button type="button" class="btn btn-secondary btn-sm" id="selectAllBtn">Markera alla</button>
             <button type="button" class="btn btn-secondary btn-sm" id="clearSelectionBtn">Rensa urval</button>
+            <button type="button" class="btn btn-success btn-sm" id="downloadSelectedBtn" disabled>Ladda ner valda</button>
             <button type="button" class="btn btn-danger btn-sm" id="deleteSelectedBtn" hidden disabled>🗑️ Ta bort valda</button>
         </div>
-        <p class="viewer-help">Klicka på en ruta för att markera den, eller rita en rektangel (verktyget uppe till vänster) för att markera flera. Den publicerade XYZ-tjänsten visas under rutorna.</p>
         <p id="viewerMessage" role="status"></p>
         <div id="viewerMap"></div>
     </div>
@@ -36,6 +40,9 @@
         const message = document.getElementById('viewerMessage');
         const statsText = document.getElementById('viewerStats');
         const deleteBtn = document.getElementById('deleteSelectedBtn');
+        const downloadBtn = document.getElementById('downloadSelectedBtn');
+        const themeSelect = document.getElementById('viewerTheme');
+        const themeLabels = { hillshade: 'Terrängskuggning', red: 'Röd höjdskala', green: 'Grön höjdskala' };
         const selected = new Set();
         const tileLayers = new Map();
         let isAdmin = false;
@@ -44,13 +51,21 @@
         let xyzLayer = null;
         let firstLoad = true;
 
-        const map = L.map('viewerMap').setView([62, 15], 5);
+        const map = L.map('viewerMap', { zoomControl: false }).setView([62, 15], 5);
+        L.control.zoom({ zoomInTitle: 'Zooma in', zoomOutTitle: 'Zooma ut' }).addTo(map);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '&copy; OpenStreetMap'
         }).addTo(map);
         const layerControl = L.control.layers({}, {}).addTo(map);
         const drawn = new L.FeatureGroup().addTo(map);
+        L.drawLocal.draw.toolbar.actions.title = 'Avbryt ritning';
+        L.drawLocal.draw.toolbar.actions.text = 'Avbryt';
+        L.drawLocal.draw.toolbar.buttons.rectangle = 'Markera rutor med en rektangel';
+        L.drawLocal.draw.handlers.rectangle.tooltip.start = 'Dra en rektangel över rutorna.';
+        L.drawLocal.draw.handlers.simpleshape.tooltip.end = 'Släpp för att välja rutor.';
+        L.drawLocal.draw.toolbar.finish.title = 'Slutför ritning';
+        L.drawLocal.draw.toolbar.finish.text = 'Slutför';
         map.addControl(new L.Control.Draw({
             draw: { polygon: false, polyline: false, circle: false, marker: false, circlemarker: false, rectangle: { shapeOptions: { color: '#d9534f' } } },
             edit: false
@@ -86,12 +101,26 @@
             statsText.textContent = `${tileLayers.size} rutor · ${selected.size} valda (${formatBytes(size)})`;
             deleteBtn.textContent = `🗑️ Ta bort valda (${selected.size})`;
             deleteBtn.disabled = !selected.size || locked;
+            downloadBtn.disabled = !selected.size || locked;
         }
 
         async function catalogOverlay() {
             const response = await fetch('/terrain/catalogs');
             const data = await response.json();
-            const catalog = (data.catalogs || []).find(item => item.folderName === folder);
+            const available = (data.catalogs || []).filter(item => item.folderName === folder);
+            const previousAlias = themeSelect.value;
+            themeSelect.replaceChildren();
+            for (const item of available) {
+                const option = document.createElement('option');
+                option.value = item.alias;
+                const style = item.hillshadeStyle || {};
+                const themeLabel = themeLabels[style.theme || 'hillshade'];
+                option.textContent = `${item.title === themeLabel ? themeLabel : `${item.title} · ${themeLabel}`}${style.theme && style.theme !== 'hillshade' ? ` (${style.minElevation ?? 0}–${style.maxElevation ?? 1000} m)` : ''}`;
+                themeSelect.append(option);
+            }
+            document.getElementById('viewerThemeControl').hidden = !available.length;
+            if (available.some(item => item.alias === previousAlias)) themeSelect.value = previousAlias;
+            const catalog = available.find(item => item.alias === themeSelect.value);
             if (!catalog) return null;
             let url = `/terrain/${encodeURIComponent(catalog.alias)}/tiles/{z}/{x}/{y}.png?v=${Date.now()}`;
             if (catalog.isPublic === false) {
@@ -102,6 +131,19 @@
             }
             return { title: catalog.title, layer: L.tileLayer(url, { maxZoom: 22, opacity: 0.85 }) };
         }
+
+        themeSelect.addEventListener('change', async () => {
+            try {
+                const overlay = await catalogOverlay();
+                if (xyzLayer) { layerControl.removeLayer(xyzLayer); map.removeLayer(xyzLayer); xyzLayer = null; }
+                if (overlay) {
+                    xyzLayer = overlay.layer.addTo(map);
+                    layerControl.addOverlay(xyzLayer, `XYZ: ${overlay.title}`);
+                }
+            } catch (error) {
+                message.textContent = 'Kunde inte läsa karttemat.';
+            }
+        });
 
         async function load() {
             message.textContent = '';
@@ -149,7 +191,7 @@
                 if (locked) message.textContent = 'Mappen används av en pågående nedladdning eller bearbetning. Radering är spärrad tills den är klar.';
                 refreshSelection();
             } catch (error) {
-                message.textContent = error.message;
+                message.textContent = error instanceof TypeError ? 'Kunde inte ansluta till servern.' : error.message;
                 statsText.textContent = '';
             }
         }
@@ -161,6 +203,28 @@
         document.getElementById('clearSelectionBtn').addEventListener('click', () => {
             selected.clear();
             refreshSelection();
+        });
+        downloadBtn.addEventListener('click', async () => {
+            downloadBtn.disabled = true;
+            message.textContent = 'Förbereder nedladdning...';
+            try {
+                const response = await fetch(`/lmv/downloads/${encodeURIComponent(folder)}/tiles/download`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames: [...selected] })
+                });
+                if (!response.ok) throw new Error((await response.json()).error || 'Nedladdningen misslyckades.');
+                const url = URL.createObjectURL(await response.blob());
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'rasterurval.zip';
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+                message.textContent = 'Rasterurvalet har laddats ner.';
+            } catch (error) {
+                message.textContent = error instanceof TypeError ? 'Kunde inte ansluta till servern.' : error.message;
+            } finally {
+                refreshSelection();
+            }
         });
         deleteBtn.addEventListener('click', async () => {
             const names = [...selected];
@@ -182,7 +246,7 @@
                 await load();
                 message.textContent = `${data.removed} raster borttagna. ${data.remaining} kvar; VRT och XYZ är uppdaterade.`;
             } catch (error) {
-                message.textContent = error.message;
+                message.textContent = error instanceof TypeError ? 'Kunde inte ansluta till servern.' : error.message;
                 refreshSelection();
             }
         });

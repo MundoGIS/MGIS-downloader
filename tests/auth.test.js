@@ -41,11 +41,11 @@ test('login, admin-only management and session invalidation', async () => {
         assert.equal((await request(`/terrain/private/tiles/10/12/345.png?api_key=${privateKey}`)).status, 200);
         assert.equal((await request('/terrain/private/tiles/10/12/345.png', { headers: { 'x-api-key': privateKey } })).status, 200);
         assert.equal((await request('/terrain/example/catalog.json')).status, 401);
-        assert.throws(() => createInitialAdmin('initialAdmin', '12345'), /at least 6/);
+        assert.throws(() => createInitialAdmin('initialAdmin', '12345'), /minst 6/);
         createInitialAdmin('initialAdmin', 'example-test-password-123');
         assert.deepEqual(await (await request('/auth/setup-status')).json(), { adminConfigured: true });
         assert.match(JSON.parse(fs.readFileSync(process.env.USERS_FILE, 'utf8'))[0].hash, /^\$2/);
-        assert.throws(() => createInitialAdmin('anotherAdmin', 'example-test-password-123'), /already exist/);
+        assert.throws(() => createInitialAdmin('anotherAdmin', 'example-test-password-123'), /finns redan/);
 
         const adminLogin = await jsonRequest('/auth/login', { username: 'initialAdmin', password: 'example-test-password-123' });
         assert.equal(adminLogin.status, 200);

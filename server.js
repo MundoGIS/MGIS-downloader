@@ -42,7 +42,7 @@ app.use(bodyParser.json({ limit: '50mb' }));
 app.set('trust proxy', 'loopback');
 installAuth(app, { getCatalog: alias => loadPublishedCatalogs()[alias] });
 app.use(express.static('public'));
-const downloadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+const downloadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'För många förfrågningar. Försök igen senare.' } });
 
 function ensureTerrainCatalogStore() {
     try {
@@ -135,7 +135,7 @@ function removeCatalogGeneratedFiles(entry) {
 function runGdalCommand(exePath, args, cwd = null) {
     return new Promise((resolve, reject) => {
         if (!exePath || !fs.existsSync(exePath)) {
-            return reject(new Error(`Falta el ejecutable GDAL: ${exePath || '<no definido>'}. Revisa GDAL/QGIS en .env.`));
+            return reject(new Error(`GDAL-programmet saknas: ${exePath || '<ej angivet>'}. Kontrollera GDAL/QGIS i .env.`));
         }
 
         const child = spawn(exePath, args, { cwd: cwd || __dirname, windowsHide: true, env: GDAL_ENV });
@@ -162,7 +162,7 @@ function validateGdalBinarySet() {
 
     const missing = required.filter(item => !item.path || !fs.existsSync(item.path));
     if (missing.length) {
-        const message = `FALTAN BINARIOS GDAL: ${missing.map(item => item.name).join(', ')}. Revisa GDAL/QGIS en .env.`;
+        const message = `GDAL-program saknas: ${missing.map(item => item.name).join(', ')}. Kontrollera GDAL/QGIS i .env.`;
         console.error(message);
         return { ok: false, message, missing };
     }
@@ -268,7 +268,18 @@ async function ensureCatalogAndMetadata(req, rawFolderName, providedAlias, title
     const alias = normalizeCatalogAlias(providedAlias || folderName.replace(/^LMV_DOWNLOADS_/, ''));
     const catTitle = String(title || alias.replace(/_/g, ' ')).trim() || alias;
     if (resolutionMeters !== 'original' && !ALLOWED_TERRAIN_RESOLUTIONS.has(Number(resolutionMeters))) throw new Error('Välj original eller 10, 20, 50 eller 100 meter.');
-    const hillshadeStyle = { altitude: Number(rawStyle?.altitude ?? 35), strength: Number(rawStyle?.strength ?? 1.7) };
+    const hillshadeStyle = {
+        altitude: Number(rawStyle?.altitude ?? 35), strength: Number(rawStyle?.strength ?? 1.7),
+        theme: rawStyle?.theme ?? 'hillshade',
+        minElevation: Number(rawStyle?.minElevation ?? 0),
+        maxElevation: Number(rawStyle?.maxElevation ?? 1000)
+    };
+    if (!['hillshade', 'red', 'green'].includes(hillshadeStyle.theme)) throw new Error('Välj ett giltigt terrängtema.');
+    if (!Number.isFinite(hillshadeStyle.minElevation) || !Number.isFinite(hillshadeStyle.maxElevation) ||
+        hillshadeStyle.minElevation < -12000 || hillshadeStyle.maxElevation > 10000 ||
+        hillshadeStyle.minElevation >= hillshadeStyle.maxElevation) {
+        throw new Error('Ange en giltig höjdskala: minsta höjd måste vara lägre än största höjd (-12000 till 10000 m).');
+    }
     if (!Number.isFinite(hillshadeStyle.altitude) || hillshadeStyle.altitude < 15 || hillshadeStyle.altitude > 80 ||
         !Number.isFinite(hillshadeStyle.strength) || hillshadeStyle.strength < 0.5 || hillshadeStyle.strength > 3) {
         throw new Error('Ljusvinkel måste vara 15-80° och reliefstyrka 0,5-3.');
@@ -388,7 +399,7 @@ const gdalCheck = validateGdalBinarySet();
 if (!gdalCheck.ok) {
     console.warn(gdalCheck.message);
 } else {
-    console.log('[GDAL] Todos los binarios necesarios fueron encontrados.');
+    console.log('[GDAL] Alla nödvändiga program hittades.');
 }
 
 // --- UTILIDADES ---
@@ -787,9 +798,12 @@ function rotateCatalogCaches(sourcePaths) {
 
 // Combined Markhöjd VRTs reference tiles in other folders, so they must drop removed files too.
 async function refreshCombinedVrts(deletedPathKeys) {
-    const combined = path.join(__dirname, COMBINED_HOJD_FOLDER);
-    if (!deletedPathKeys.size || !fs.existsSync(combined)) return [];
+    if (!deletedPathKeys.size) return [];
+    const folders = fs.readdirSync(__dirname, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && (entry.name === COMBINED_HOJD_FOLDER || entry.name.startsWith('LMV_DOWNLOADS_area_')));
     const changed = [];
+    for (const entry of folders) {
+    const combined = path.join(__dirname, entry.name);
     for (const listName of fs.readdirSync(combined).filter(file => file.endsWith('_filelist.txt'))) {
         const vrtName = listName.replace(/_filelist\.txt$/, '.vrt');
         const entries = fs.readFileSync(path.join(combined, listName), 'utf8').split(/\r?\n/).filter(Boolean);
@@ -803,6 +817,7 @@ async function refreshCombinedVrts(deletedPathKeys) {
             }
         }
         changed.push(path.join(combined, vrtName));
+    }
     }
     return changed;
 }
@@ -857,7 +872,7 @@ function resolveLmvCredentials(input = {}) {
 
 function buildDynamicQml(minVal, maxVal, step = 5) {
     if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
-        throw new Error('Valores min/max inválidos para el estilo.');
+        throw new Error('Ogiltiga minimi- eller maximivärden för stilen.');
     }
 
     const start = Math.floor(minVal / step) * step;
@@ -1064,7 +1079,7 @@ function normalizeGeometryPayload(rawGeometry, inheritedCrs = 'EPSG:4326') {
 
         const geoJson = wktPolygonToGeoJSON(rawGeometry);
         if (geoJson) {
-            console.log('[normalizeGeometryPayload] WKT convertido a GeoJSON:', JSON.stringify(geoJson));
+            console.log('[normalizeGeometryPayload] WKT omvandlad till GeoJSON:', JSON.stringify(geoJson));
             return geoJson;
         }
         return null;
@@ -1091,7 +1106,7 @@ function normalizeGeometryPayload(rawGeometry, inheritedCrs = 'EPSG:4326') {
 
         if (rawGeometry.type && rawGeometry.coordinates) {
             const transformed = { type: rawGeometry.type, coordinates: transformCoordinateTree(rawGeometry.coordinates, sourceCrs) };
-            console.log('[normalizeGeometryPayload] GeoJSON recibido y normalizado:', JSON.stringify(transformed));
+            console.log('[normalizeGeometryPayload] GeoJSON mottagen och normaliserad:', JSON.stringify(transformed));
             return transformed;
         }
 
@@ -1100,7 +1115,7 @@ function normalizeGeometryPayload(rawGeometry, inheritedCrs = 'EPSG:4326') {
         }
     }
 
-    console.warn('[normalizeGeometryPayload] Formato de geometría no reconocido:', typeof rawGeometry, rawGeometry);
+    console.warn('[normalizeGeometryPayload] Okänt geometriformat:', typeof rawGeometry, rawGeometry);
     return null;
 }
 
@@ -1146,7 +1161,7 @@ async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, co
                         validateStatus: s => true
                     });
                     if (getRes.status === 401 || getRes.status === 403) {
-                        return { ok: false, status: getRes.status, message: 'Unauthorized when trying to fetch asset' };
+                        return { ok: false, status: getRes.status, message: 'Åtkomst till filen nekades.' };
                     }
                     // 200/206/3xx are considered valid
                     return { ok: true, status: getRes.status };
@@ -1194,7 +1209,7 @@ app.post('/check-species', async (req, res) => {
     if (!username || !password || !speciesName) {
         return res.status(400).json({ 
             success: false, 
-            error: 'Faltan parámetros: username, password y speciesName son requeridos' 
+            error: 'Användarnamn, lösenord och artnamn måste anges.'
         });
     }
 
@@ -1392,7 +1407,7 @@ app.get('/lmv/hojd/collections', async (req, res) => {
             if (saved?.apiToken) authHeader = `Bearer ${saved.apiToken}`;
         }
         if (!apiKey && !authHeader) {
-            return res.status(401).json({ success: false, error: 'API Key requerida en el header X-API-Key o Authorization: Bearer <token>' });
+            return res.status(401).json({ success: false, error: 'Ange API-nyckel eller Bearer-token, eller spara ett LMV-konto.' });
         }
 
         const headers = {};
@@ -1472,13 +1487,13 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         const geoJson = normalizeGeometryPayload(geometry);
         if (geoJson) {
             searchRequestBody.intersects = geoJson;
-            writeToLog(`[${collectionId}] Búsqueda con geometría: ${JSON.stringify(geoJson)}`);
+            writeToLog(`[${collectionId}] Söker inom geometrin: ${JSON.stringify(geoJson)}`);
         } else {
-            console.warn(`[${collectionId}] Geometría inválida ignorada.`);
-            writeToLog(`[${collectionId}] Geometría inválida ignorada: ${JSON.stringify(geometry)}`);
+            console.warn(`[${collectionId}] Ogiltig geometri ignorerades.`);
+            writeToLog(`[${collectionId}] Ogiltig geometri ignorerades: ${JSON.stringify(geometry)}`);
         }
     } else {
-        writeToLog(`[${collectionId}] Búsqueda sin filtro geométrico (toda Suecia).`);
+        writeToLog(`[${collectionId}] Söker utan geografiskt filter (hela Sverige).`);
     }
 
     let nextUrl = `${STAC_BASE}/search`;
@@ -1639,7 +1654,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
     try {
     for (let i = 0; i < downloadQueue.length; i++) {
         if (abortSignal && abortSignal.aborted) {
-            writeToLog(`[${collectionId}] Descarga cancelada por el usuario.`);
+            writeToLog(`[${collectionId}] Nedladdningen avbröts av användaren.`);
             return areaTiles;
         }
         const itemData = downloadQueue[i];
@@ -1752,7 +1767,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                 }
                 if (status === 429) {
                     const waitTime = 30000;
-                    console.warn(`[${collectionId}] 429 Rate Limit. Esperando ${waitTime/1000}s...`);
+                    console.warn(`[${collectionId}] Anropsgränsen nåddes (429). Väntar ${waitTime/1000} sekunder...`);
                     await abortableDelay(waitTime, abortSignal);
                 } else {
                     console.warn(`[${collectionId}] Fel vid nedladdning ${filename} (HTTP ${status || 'okänt'}). Försök ${attempt}/${maxRetries}`);
@@ -1798,7 +1813,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
             fs.writeFileSync(indexFile, JSON.stringify(geoJSON, null, 2));
             writeToLog(`[${collectionId}] Tile Index genererat: ${indexFile}`);
         } catch (err) {
-            console.error(`Error escribiendo tile index: ${err.message}`);
+            console.error(`Kunde inte skriva rasterindex: ${err.message}`);
         }
     }
 
@@ -1894,6 +1909,27 @@ function serializeJob(job) {
     };
 }
 
+async function createDownloadedArea(job, tiles) {
+    const folderName = `LMV_DOWNLOADS_area_${slugify(job.label) || 'omrade'}_${randomUUID()}`;
+    const folder = path.join(__dirname, folderName);
+    const sources = [...new Set(tiles.map(source => path.resolve(__dirname, source)))];
+    fs.mkdirSync(folder, { recursive: true });
+    job.folders.add(folderName);
+    job.progress.phase = 'vrt';
+    try {
+        const references = sources.map(source => path.relative(folder, source).split(path.sep).join('/'));
+        await buildVrtWithStyle(folder, references, 'index.vrt', job.collectionId);
+        const meta = loadDownloadMeta();
+        meta[folderName] = { displayName: job.label, description: '', updatedAt: new Date().toISOString() };
+        saveDownloadMeta(meta);
+        job.resultPath = path.join(folderName, 'index.vrt');
+    } catch (error) {
+        fs.rmSync(folder, { recursive: true, force: true });
+        job.folders.delete(folderName);
+        throw error;
+    }
+}
+
 function jobUsingFolder(folderName) {
     for (const job of jobs.values()) {
         if ((job.status === 'running' || job.status === 'stopping') && job.folders.has(folderName)) return job;
@@ -1980,15 +2016,7 @@ app.post('/lmv/start-full-download', downloadLimiter, async (req, res) => {
                     }
 
                     if (allAreaTiles.length > 0 && !abortController.signal.aborted) {
-                        job.progress.phase = 'vrt';
-                        fs.mkdirSync(COMBINED_HOJD_FOLDER, { recursive: true });
-                        job.folders.add(COMBINED_HOJD_FOLDER);
-                        const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
-                        const areaName = geometryLabel ? slugify(geometryLabel) : (geometry ? `omrade-${stamp}` : 'hela-sverige');
-                        const relPaths = allAreaTiles.map(p => path.relative(COMBINED_HOJD_FOLDER, p).split(path.sep).join('/'));
-                        await buildVrtWithStyle(COMBINED_HOJD_FOLDER, relPaths, `${areaName}.vrt`, 'ALL_MARKHOJD');
-                        job.resultPath = path.join(COMBINED_HOJD_FOLDER, `${areaName}.vrt`);
-                        writeToLog(`[ALL_MARKHOJD] Öppna ${job.resultPath} i QGIS för hela området.`);
+                        await createDownloadedArea(job, allAreaTiles);
                     }
 
                     writeToLog(`[ALL_MARKHOJD] SKANNING SLUTFÖRD! Kontrollera nedladdningsmappen.`);
@@ -2007,10 +2035,9 @@ app.post('/lmv/start-full-download', downloadLimiter, async (req, res) => {
     // Normal logik (en enda samling)
     res.status(202).json({ success: true, message: `Process startad för '${collectionId}'.`, downloadId });
     fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, abortController.signal, job)
-        .then(() => {
-            const folder = [...job.folders][0];
-            if (type === 'hojd' && folder && fs.existsSync(path.join(folder, 'index.vrt'))) {
-                job.resultPath = path.join(folder, 'index.vrt');
+        .then(async tiles => {
+            if (type === 'hojd' && tiles?.length && !abortController.signal.aborted) {
+                await createDownloadedArea(job, tiles);
             }
         })
         .catch(err => {
@@ -2366,6 +2393,28 @@ app.get('/lmv/downloads/:folderName/tiles', async (req, res) => {
     }
 });
 
+app.post('/lmv/downloads/:folderName/tiles/download', (req, res) => {
+    const folderName = req.params.folderName;
+    const folder = downloadFolderPath(folderName);
+    if (!folder) return res.status(404).json({ error: 'Mappen hittades inte.' });
+    if (jobUsingFolder(folderName) || rasterMaintenance.has(folderName)) return res.status(409).json({ error: 'Mappen bearbetas. Försök igen när arbetet är klart.' });
+    const filenames = req.body?.filenames;
+    if (!Array.isArray(filenames) || !filenames.length || filenames.length > 10000) return res.status(400).json({ error: 'Välj minst en rasterruta.' });
+    const manifest = loadManifest(folder, folderName.replace(/^LMV_DOWNLOADS_/, ''));
+    const names = [...new Set(filenames)];
+    if (names.some(name => typeof name !== 'string' || path.basename(name) !== name || !manifest.tiles[name])) {
+        return res.status(400).json({ error: 'Urvalet innehåller ogiltiga rasterfiler.' });
+    }
+    res.type('application/zip');
+    res.attachment('rasterurval.zip');
+    const archive = archiver('zip', { zlib: { level: 1 } });
+    archive.on('error', () => { if (!res.headersSent) res.status(500); res.end(); });
+    res.on('close', () => { if (!res.writableFinished) archive.abort(); });
+    archive.pipe(res);
+    for (const name of names) archive.file(path.join(folder, name), { name });
+    archive.finalize();
+});
+
 app.post('/lmv/downloads/:folderName/tiles/delete', requireAdminRole, async (req, res) => {
     const folderName = req.params.folderName;
     if (!downloadFolderPath(folderName)) return res.status(404).json({ success: false, error: 'Mapp hittades inte' });
@@ -2456,10 +2505,10 @@ app.patch('/terrain/:catalog/access', (req, res) => {
     const alias = normalizeCatalogAlias(req.params.catalog);
     const catalogs = loadPublishedCatalogs();
     const catalog = catalogs[alias];
-    if (!catalog) return res.status(404).json({ error: 'Catalog not found' });
-    if (activePublications.has(alias)) return res.status(409).json({ error: 'Publication in progress' });
+    if (!catalog) return res.status(404).json({ error: 'Katalogen hittades inte.' });
+    if (activePublications.has(alias)) return res.status(409).json({ error: 'Publicering pågår.' });
     const { isPublic, rotateKey } = req.body || {};
-    if (typeof isPublic !== 'boolean' || (rotateKey !== undefined && typeof rotateKey !== 'boolean')) return res.status(400).json({ error: 'Invalid access settings' });
+    if (typeof isPublic !== 'boolean' || (rotateKey !== undefined && typeof rotateKey !== 'boolean')) return res.status(400).json({ error: 'Ogiltiga åtkomstinställningar.' });
     // The existing key survives public/private toggles; only an explicit rotation replaces it.
     const generated = !isPublic && (rotateKey || !catalog.apiKeyHash) ? newServiceKey() : null;
     catalog.isPublic = isPublic;
