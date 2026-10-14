@@ -13,6 +13,7 @@ temp/
 *.tmp
 *.temp
 *.swp
+tests/
 
 # Logs
 *.log
